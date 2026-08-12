@@ -24,11 +24,13 @@ htmlcov/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+frontend/coverage/
+frontend/.eslintcache
 static/
 
 # Runtime data and downloaded models
-data/
-models/
+/data/
+/models/
 *.db
 *.db-shm
 *.db-wal
@@ -37,6 +39,10 @@ models/
 benchmark-results/
 playwright-report/
 test-results/
+/tmp/
+
+# Locally governed acceptance corpus (not part of the original fixtures)
+/tests/fixtures/progress-pages/
 
 # Editors / operating systems
 .idea/

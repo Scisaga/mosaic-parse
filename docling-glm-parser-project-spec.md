@@ -196,7 +196,7 @@ RTX 5060 Ti 或 RTX 2080 Ti
 └── GLM-OCR 推理服务
 
 RTX 5090
-└── Ollama + qwen3.6:27b（可选 VLM 回退）
+└── Ollama + qwen3.6:35b（可选 VLM 回退）
 ```
 
 ### 4.2 为什么第一版不再增加独立 PDF Router
@@ -1169,7 +1169,7 @@ GLM_SDK_URL=http://glm-ocr-sdk:5002/glmocr/parse
 VLM_ENABLED=0
 VLM_BASE_URL=http://5090-host:11434/v1
 VLM_API_KEY=ollama
-VLM_MODEL=qwen3.6:27b
+VLM_MODEL=qwen3.6:35b
 VLM_MAX_CONCURRENCY=1
 VLM_TIMEOUT_SECONDS=300
 VLM_TEMPERATURE=0
@@ -1257,7 +1257,7 @@ glm-ocr:8000
           ▼
 
 ollama:11434
-└── GPU 5090 + qwen3.6:27b
+└── GPU 5090 + qwen3.6:35b
 ```
 
 `docker-compose.yml` 示例骨架：
@@ -1673,7 +1673,7 @@ Python 包名：docling_glm_parser
 4. OCR Engine 通过 docling-glm-ocr 或等价的封装调用远程
    zai-org/GLM-OCR OpenAI-compatible endpoint。
 5. 可选实现 Docling VLM Pipeline Adapter，通过远程 Ollama
-   qwen3.6:27b 处理 mode=vlm；默认关闭自动 VLM fallback。
+   qwen3.6:35b 处理 mode=vlm；默认关闭自动 VLM fallback。
 6. 主服务必须能在无 GPU 环境运行。GLM-OCR 和 Ollama 均为外部 HTTP
    后端，不在主服务进程中启动。
 7. 输出内容格式只支持 markdown 和 text；API 使用 JSON 封装状态和结果。

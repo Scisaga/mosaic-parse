@@ -98,9 +98,11 @@ docker inspect docling_glm_ocr --format '{{json .HostConfig.DeviceRequests}}'
 curl --fail http://127.0.0.1:8001/health
 ```
 
-Tune `GLM_GPU_MEMORY_UTILIZATION` and `GLM_MAX_MODEL_LEN` if the target device is
-smaller than the development GPU. GPU 1 in the reference host is an RTX 2080 Ti
-(Turing), which cannot execute BF16; the Compose baseline therefore passes
+The Compose default `GLM_GPU_MEMORY_UTILIZATION=0.40` was validated for a
+single-concurrency workload on the 22 GiB development GPU. Increase it only
+when higher concurrent context capacity is required and the GPU is dedicated to
+this service. GPU 1 in the reference host is an RTX 2080 Ti (Turing), which
+cannot execute BF16; the Compose baseline therefore passes
 `--dtype half` for FP16. Change `GLM_DTYPE` only after verifying the target GPU.
 `GLM_OCR_MAX_TOKENS` is the response budget and must remain below
 `GLM_MAX_MODEL_LEN` so the image and prompt still fit in the context window.
@@ -121,7 +123,7 @@ GLM_OCR_MODEL=zai-org/GLM-OCR
 
 VLM_ENABLED=1
 VLM_BASE_URL=http://ollama-host.example:11434/v1
-VLM_MODEL=qwen3.6:27b
+VLM_MODEL=qwen3.6:35b
 VLM_MAX_RETRIES=1
 ```
 

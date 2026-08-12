@@ -15,6 +15,12 @@ SSE、MCP、Docker Compose 和 GHCR 镜像。
 > or endorsed by the Docling or GLM-OCR projects. Docling 与 GLM-OCR 名称及
 > 商标归各自权利人所有。
 
+## 界面预览
+
+![Docling GLM Web UI：原始 PDF 与 Markdown 表格解析结果并排预览](docs/assets/web-ui.png)
+
+截图使用仓库内自制的 `tests/fixtures/table-report.pdf`，不包含第三方文档内容。
+
 ## 项目边界
 
 本项目只把 PDF/图片解析为 Markdown 或纯文本。它不实现财务指标抽取、
@@ -87,6 +93,7 @@ curl --fail-with-body http://localhost:12303/v1/documents/parse \
 GLM_OCR_ENABLED=1
 GLM_GPU_DEVICE_ID=1
 GLM_DTYPE=half
+GLM_GPU_MEMORY_UTILIZATION=0.40
 ```
 
 然后：
@@ -110,7 +117,7 @@ GLM_OCR_MODEL=zai-org/GLM-OCR
 
 VLM_ENABLED=1
 VLM_BASE_URL=http://ollama-host:11434/v1
-VLM_MODEL=qwen3.6:27b
+VLM_MODEL=qwen3.6:35b
 VLM_DIAGRAM_ENRICHMENT_ENABLED=1
 ```
 

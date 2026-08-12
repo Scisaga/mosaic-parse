@@ -99,7 +99,7 @@ class Settings(BaseSettings):
     vlm_enabled: bool = False
     vlm_base_url: str = "http://5090-host:11434/v1"
     vlm_api_key: OptionalSecret = "ollama"
-    vlm_model: str = "qwen3.6:27b"
+    vlm_model: str = "qwen3.6:35b"
     vlm_max_concurrency: int = Field(default=1, ge=1)
     vlm_timeout_seconds: float = Field(default=300.0, gt=0)
     vlm_temperature: float = Field(default=0.0, ge=0)

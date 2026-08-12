@@ -58,7 +58,7 @@ class OllamaVlmParser(DocumentParser):
         self.enabled = bool(setting(settings, "vlm_enabled", False))
         self.base_url = str(setting(settings, "vlm_base_url", "http://localhost:11434/v1")).rstrip("/")
         self.api_key = setting(settings, "vlm_api_key", "ollama")
-        self.model = str(setting(settings, "vlm_model", "qwen3.6:27b"))
+        self.model = str(setting(settings, "vlm_model", "qwen3.6:35b"))
         self.timeout = float(setting(settings, "vlm_timeout_seconds", 300.0))
         self.max_retries = int(setting(settings, "vlm_max_retries", 1))
         self.temperature = float(setting(settings, "vlm_temperature", 0.0))
