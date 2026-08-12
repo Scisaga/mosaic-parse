@@ -1,0 +1,45 @@
+{
+  "name": "docling-glm-parser-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc -b && vite build",
+    "typecheck": "tsc -b --pretty false",
+    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "5.59.20",
+    "dompurify": "3.4.13",
+    "mermaid": "11.16.1",
+    "pdfjs-dist": "4.8.69",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-markdown": "9.0.1",
+    "rehype-sanitize": "6.0.0",
+    "remark-gfm": "4.0.0"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "6.6.3",
+    "@testing-library/react": "16.1.0",
+    "@testing-library/user-event": "14.5.2",
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "@typescript-eslint/eslint-plugin": "8.15.0",
+    "@typescript-eslint/parser": "8.15.0",
+    "@vitejs/plugin-react": "4.3.4",
+    "eslint": "8.57.1",
+    "eslint-plugin-react-hooks": "5.1.0",
+    "eslint-plugin-react-refresh": "0.4.14",
+    "jsdom": "26.1.0",
+    "typescript": "5.6.3",
+    "vite": "6.4.3",
+    "vitest": "3.2.6"
+  },
+  "engines": {
+    "node": ">=18.18 <19 || >=20"
+  }
+}

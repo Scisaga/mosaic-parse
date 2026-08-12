@@ -1,0 +1,91 @@
+name: docling-glm-parser
+
+services:
+  parser:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${PARSER_IMAGE:-ghcr.io/scisaga/docling-glm-parser:0.1.0}
+    container_name: docling_glm_parser
+    restart: unless-stopped
+    init: true
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATA_DIR: /data
+      STATIC_DIR: /app/static
+      PORT: ${PORT:-12303}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1,glm-ocr,parser}
+      DOCLING_DEVICE: cpu
+      DOCLING_COMPILE_MODELS: ${DOCLING_COMPILE_MODELS:-0}
+      DOCLING_LOCAL_ARTIFACTS_PATH: /models/docling
+      GLM_OCR_ENABLED: ${GLM_OCR_ENABLED:-0}
+    ports:
+      - "${PORT:-12303}:${PORT:-12303}"
+    volumes:
+      - parser-data:/data
+      - docling-models:/models/docling
+      - huggingface-cache:/models/huggingface
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:$${PORT:-12303}/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10m
+      retries: 5
+    stop_grace_period: 30s
+
+  glm-ocr:
+    profiles: ["glm"]
+    image: ${GLM_VLLM_IMAGE:-vllm/vllm-openai:v0.19.1}
+    container_name: docling_glm_ocr
+    restart: unless-stopped
+    ipc: host
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1,glm-ocr,parser}
+    ports:
+      - "${GLM_OCR_BIND_ADDRESS:-127.0.0.1}:${GLM_OCR_HOST_PORT:-8001}:8000"
+    volumes:
+      - huggingface-cache:/root/.cache/huggingface
+    command:
+      - zai-org/GLM-OCR
+      - --port
+      - "8000"
+      - --served-model-name
+      - zai-org/GLM-OCR
+      - --dtype
+      - ${GLM_DTYPE:-half}
+      - --gpu-memory-utilization
+      - ${GLM_GPU_MEMORY_UTILIZATION:-0.90}
+      - --max-model-len
+      - ${GLM_MAX_MODEL_LEN:-16384}
+      - --max-num-batched-tokens
+      - "8192"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GLM_GPU_DEVICE_ID:-1}"]
+              capabilities: [gpu]
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"
+      interval: 30s
+      timeout: 8s
+      start_period: 5m
+      retries: 10
+    stop_grace_period: 1m
+
+volumes:
+  parser-data:
+  docling-models:
+  huggingface-cache:

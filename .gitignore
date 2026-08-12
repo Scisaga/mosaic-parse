@@ -1,0 +1,46 @@
+# Secrets and local overrides
+.env
+.env.*
+!.env.example
+
+# Python
+.python-version
+.venv/
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+static/
+
+# Runtime data and downloaded models
+data/
+models/
+*.db
+*.db-shm
+*.db-wal
+
+# Benchmark and test output
+benchmark-results/
+playwright-report/
+test-results/
+
+# Editors / operating systems
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

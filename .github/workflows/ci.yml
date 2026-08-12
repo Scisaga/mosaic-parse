@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend / OpenAPI
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GLM_OCR_ENABLED: "0"
+      VLM_ENABLED: "0"
+      DOCLING_MODEL_DOWNLOAD: "0"
+      DATA_DIR: ${{ runner.temp }}/docling-glm-data
+      STATIC_DIR: ${{ runner.temp }}/docling-glm-static
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv and Python 3.13
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.9.13"
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Verify and install the lockfile
+        run: |
+          uv lock --check
+          uv sync --frozen
+
+      - name: Ruff
+        run: uv run ruff check app scripts tests
+
+      - name: Mypy
+        run: uv run mypy app
+
+      - name: Pytest
+        run: uv run pytest -m "not gpu" --cov=app --cov-report=term-missing --cov-report=xml
+
+      - name: Validate OpenAPI contract
+        run: uv run python scripts/export_openapi.py --check
+
+      - name: Validate original fixtures
+        run: uv run python scripts/generate_fixtures.py --check
+
+      - name: Validate Compose configuration
+        run: docker compose --profile glm config --quiet
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Node 20
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci --no-audit --no-fund
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run test
+      - run: npm run build
+
+  docker:
+    name: Docker image
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build without pushing
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          tags: docling-glm-parser:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
