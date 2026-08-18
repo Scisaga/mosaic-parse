@@ -24,8 +24,7 @@ describe('result rendering contract', () => {
 describe('Mosaic header contract', () => {
   it('uses CSS mosaic tiles and keeps stage labels unadorned', () => {
     expect(styles).toContain('.stage-eyebrow::before { display: none; }')
-    expect(styles).toContain('.app-header::before')
-    expect(styles).toContain('background-size: 10px 10px, 10px 10px, 100% 100%')
-    expect(styles).toContain('radial-gradient(ellipse 62% 110% at 18% 138%')
+    expect(styles).toContain('.header-mosaic')
+    expect(styles).toContain('rgba(5, 18, 31, .24) 34% 68%')
   })
 })
