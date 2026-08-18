@@ -59,6 +59,10 @@ function cssColor(base: Rgb, lightness: number, coolness: number) {
   return `rgb(${channels.join(' ')})`
 }
 
+function clamp(value: number) {
+  return Math.max(0, Math.min(1, value))
+}
+
 export function generateMosaicCells(
   width: number,
   height: number,
@@ -69,16 +73,25 @@ export function generateMosaicCells(
   const rows = Math.max(1, Math.ceil(height / tileSize))
   const gap = Math.max(1, tileSize * .11)
   const cells: MosaicCell[] = []
+  const angle = Math.PI * (.2 + hash(19, 41, seed) * .6)
+  const directionX = Math.cos(angle)
+  const directionY = Math.sin(angle)
+  const projectionRadius = (Math.abs(directionX) + Math.abs(directionY)) / 2
 
   for (let row = 0; row < rows; row += 1) {
     for (let column = 0; column < columns; column += 1) {
-      const horizontal = columns === 1 ? 0 : column / (columns - 1)
-      const broadNoise = valueNoise(column, row, seed, 8) - .5
-      const localNoise = valueNoise(column, row, seed ^ 0x6d2b79f5, 3) - .5
-      const verticalShade = rows === 1 ? 0 : (row / (rows - 1) - .5) * 5
-      const base = paletteColor(horizontal)
-      const lightness = broadNoise * 24 + localNoise * 7 + verticalShade
-      const coolness = broadNoise * 7
+      const horizontal = columns === 1 ? .5 : column / (columns - 1)
+      const vertical = rows === 1 ? .5 : row / (rows - 1)
+      const directional = projectionRadius === 0
+        ? .5
+        : ((horizontal - .5) * directionX + (vertical - .5) * directionY) / (projectionRadius * 2) + .5
+      const broadNoise = valueNoise(horizontal * 3.2, vertical * 2.8, seed, 1)
+      const localNoise = valueNoise(horizontal * 7.5, vertical * 5.5, seed ^ 0x6d2b79f5, 1)
+      const lightNoise = valueNoise(horizontal * 4.4, vertical * 3.8, seed ^ 0x9e3779b9, 1) - .5
+      const colorPosition = clamp(directional * .46 + broadNoise * .42 + localNoise * .12)
+      const base = paletteColor(colorPosition)
+      const lightness = lightNoise * 20 + (localNoise - .5) * 5
+      const coolness = (broadNoise - .5) * 9
       cells.push({
         color: cssColor(base, lightness, coolness),
         height: Math.max(1, tileSize - gap),
