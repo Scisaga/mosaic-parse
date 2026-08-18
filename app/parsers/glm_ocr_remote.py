@@ -29,17 +29,17 @@ def _install_plugin_compatibility() -> None:
     from docling.models.base_ocr_model import BaseOcrModel
     from docling_glm_ocr import GlmOcrRemoteModel
 
-    if getattr(GlmOcrRemoteModel, "_docling_glm_parser_compat", False):
+    if getattr(GlmOcrRemoteModel, "_mosaicparse_compat", False):
         return
 
     original_call = GlmOcrRemoteModel.__call__
 
     def compatible_call(self: Any, conv_res: Any, page_batch: Iterable[Any]) -> Iterable[Any]:
-        self._local.docling_glm_conv_res = conv_res
+        self._local.mosaicparse_conv_res = conv_res
         try:
             yield from original_call(self, conv_res, page_batch)
         finally:
-            self._local.docling_glm_conv_res = None
+            self._local.mosaicparse_conv_res = None
 
     def compatible_post_process(
         self: Any,
@@ -48,7 +48,7 @@ def _install_plugin_compatibility() -> None:
         conv_res: Any | None = None,
         priority: Any | None = None,
     ) -> None:
-        actual_conversion = conv_res or getattr(self._local, "docling_glm_conv_res", None)
+        actual_conversion = conv_res or getattr(self._local, "mosaicparse_conv_res", None)
         if actual_conversion is None:
             raise RuntimeError("GLM-OCR post-processing has no active conversion result")
         BaseOcrModel.post_process_cells(self, ocr_cells, page, actual_conversion, priority)
@@ -112,22 +112,28 @@ def _install_plugin_compatibility() -> None:
     GlmOcrRemoteModel.post_process_cells = compatible_post_process  # type: ignore[method-assign]
     GlmOcrRemoteModel._get_client = compatible_get_client  # type: ignore[method-assign]
     GlmOcrRemoteModel._recognise_crop = compatible_recognise_crop  # type: ignore[method-assign]
-    GlmOcrRemoteModel._docling_glm_parser_compat = True  # type: ignore[attr-defined]
+    GlmOcrRemoteModel._mosaicparse_compat = True  # type: ignore[attr-defined]
 
 
 class GlmOcrRemoteAdapter:
     name = "glm-ocr-remote"
 
-    def __init__(self, settings: object | None, http_client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self, settings: object | None, http_client: httpx.AsyncClient | None = None
+    ) -> None:
         self.settings = settings
         self.enabled = bool(setting(settings, "glm_ocr_enabled", True))
-        self.api_url = str(setting(settings, "glm_ocr_api_url", "http://localhost:8001/v1/chat/completions"))
+        self.api_url = str(
+            setting(settings, "glm_ocr_api_url", "http://localhost:8001/v1/chat/completions")
+        )
         self.api_key = setting(settings, "glm_ocr_api_key", None)
         self.model = str(setting(settings, "glm_ocr_model", "zai-org/GLM-OCR"))
         self.health_ttl = float(setting(settings, "backend_health_ttl_seconds", 15.0))
         probe_timeout = min(5.0, float(setting(settings, "glm_ocr_timeout_seconds", 120.0)))
         self._owns_client = http_client is None
-        self._client = http_client or httpx.AsyncClient(timeout=httpx.Timeout(probe_timeout), trust_env=False)
+        self._client = http_client or httpx.AsyncClient(
+            timeout=httpx.Timeout(probe_timeout), trust_env=False
+        )
         self._last_status: BackendStatus | None = None
         self._last_probe_monotonic = 0.0
 
@@ -148,9 +154,15 @@ class GlmOcrRemoteAdapter:
                 model=self.model,
             )
         now = time.monotonic()
-        if not force and self._last_status is not None and now - self._last_probe_monotonic <= self.health_ttl:
+        if (
+            not force
+            and self._last_status is not None
+            and now - self._last_probe_monotonic <= self.health_ttl
+        ):
             return self._last_status
-        headers: dict[str, str] = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        headers: dict[str, str] = (
+            {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        )
         started = time.perf_counter()
         try:
             response = await self._client.get(self._models_url(), headers=headers)
@@ -207,7 +219,9 @@ class GlmOcrRemoteAdapter:
             api_key=self.api_key,
             model_name=self.model,
             lang=languages,
-            scale=float(scale if scale is not None else setting(self.settings, "glm_ocr_scale", 3.0)),
+            scale=float(
+                scale if scale is not None else setting(self.settings, "glm_ocr_scale", 3.0)
+            ),
             max_image_pixels=int(setting(self.settings, "glm_ocr_max_image_pixels", 4_500_000)),
             max_concurrent_requests=int(setting(self.settings, "glm_ocr_max_concurrency", 4)),
             max_tokens=int(setting(self.settings, "glm_ocr_max_tokens", 4_096)),

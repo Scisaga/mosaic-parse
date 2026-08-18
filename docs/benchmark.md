@@ -11,6 +11,18 @@ Real GPU regression tests should use an access-controlled corpus whose license,
 retention, and confidentiality are documented. Do not commit customer reports
 or copyrighted research PDFs.
 
+Private page-level truth can be recorded in a local manifest using
+`tests/fixtures/quality-manifest.example.json` as the schema. The manifest and
+PDFs stay outside Git; it records SHA-256, target pages, text/order anchors,
+dates, numbers, table shapes, allowed warnings, and performance budgets. Run it
+with:
+
+```bash
+uv run python scripts/evaluate_quality.py pdf_sample/regression.local.json \
+  --base-url http://127.0.0.1:12303 \
+  --json-output pdf_sample/results/latest.json
+```
+
 ## Metrics
 
 Record at least:
@@ -22,10 +34,17 @@ Record at least:
 - empty-page and repeated-text rates;
 - mean and p95 seconds per page;
 - peak parser RAM;
-- GLM call count and VLM fallback rate.
+- GLM/Qwen call count, visual-page rate, unresolved conflicts, and budget exhaustion.
+- trusted/degraded/untrusted counts and candidate adoption/rejection reasons;
+- native repair, logical cross-page merge, rotation, and timeout counts.
 
 Unknown route counts are not zeros. Report them as unavailable when the parser
 or upstream component cannot observe them reliably.
+
+Performance release gates are: `balanced` native numeric pages p95 no more than
+10% above the fixed baseline; `accurate` complex pages p95 no more than about
+2x baseline; and no single VLM table page above 120 seconds. A page timeout must
+stop later candidates while retaining the primary page with a warning.
 
 ## HTTP smoke benchmark
 
@@ -65,4 +84,3 @@ Prefer focused assertions such as:
 
 Record parser version, Docling/plugin versions, model identity/revision, mode,
 profile, hardware, and all non-secret tuning values with every comparison.
-

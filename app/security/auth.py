@@ -35,4 +35,3 @@ def require_admin_token(provided: str | None, configured: str | None) -> None:
         raise ServiceError("admin_disabled", "admin endpoints require ADMIN_TOKEN", status_code=503)
     if not token_matches(provided, configured):
         raise ServiceError("invalid_admin_token", "invalid admin token", status_code=401)
-

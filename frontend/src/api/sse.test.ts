@@ -54,7 +54,7 @@ describe('fetch SSE transport', () => {
     }) as unknown as typeof fetch
     const frames: string[] = []
     await consumeSseStream({
-      url: '/v1/documents/jobs/job_1/events',
+      url: '/v1/content/jobs/job_1/events',
       signal: new AbortController().signal,
       fetchImpl,
       onFrame: (frame) => frames.push(frame.event),
@@ -62,7 +62,7 @@ describe('fetch SSE transport', () => {
     expect(frames).toEqual(['heartbeat'])
     expect(calls[0].headers.get('X-API-Key')).toBe('top-secret-token')
     expect(calls[0].headers.get('Accept')).toBe('text/event-stream')
-    expect(calls[0].url).toBe('/v1/documents/jobs/job_1/events')
+    expect(calls[0].url).toBe('/v1/content/jobs/job_1/events')
     expect(calls[0].url).not.toContain('top-secret-token')
   })
 
@@ -83,7 +83,7 @@ describe('fetch SSE transport', () => {
     const delays: number[] = []
     const eventIds: Array<string | undefined> = []
     await runSseLoop({
-      url: '/v1/documents/jobs/job_1/events',
+      url: '/v1/content/jobs/job_1/events',
       signal: controller.signal,
       fetchImpl,
       baseDelay: 10,

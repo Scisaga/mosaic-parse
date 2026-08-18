@@ -42,6 +42,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        ca-certificates \
        curl \
+       ffmpeg \
        libgl1 \
        libglib2.0-0 \
        libgomp1 \

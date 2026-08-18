@@ -1,4 +1,4 @@
-from app.utils.ids import new_document_id, new_id, new_job_id, new_request_id
+from app.utils.ids import new_content_id, new_id, new_job_id, new_request_id
 from app.utils.page_range import (
     PageRangeError,
     format_page_range,
@@ -12,7 +12,7 @@ __all__ = [
     "Timer",
     "format_page_range",
     "group_consecutive_pages",
-    "new_document_id",
+    "new_content_id",
     "new_id",
     "new_job_id",
     "new_request_id",

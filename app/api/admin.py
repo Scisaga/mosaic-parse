@@ -25,4 +25,3 @@ async def reload_parsers(request: Request) -> ReloadResponse:
 async def cleanup_jobs(request: Request) -> CleanupResponse:
     deleted = await get_runtime(request).cleanup_expired()
     return CleanupResponse(deleted_jobs=deleted)
-

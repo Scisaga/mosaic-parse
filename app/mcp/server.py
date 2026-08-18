@@ -12,8 +12,13 @@ from mcp.server import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 
-from app.api.schemas import JobResponse, ParseResponse
-from app.models import DocumentParseOptions, OutputFormat, ParseMode, ParseProfile, ServiceError
+from app.api.schemas import JobResponse
+from app.models import (
+    ContentParseOptions,
+    JobRecord,
+    ParseProfile,
+    ServiceError,
+)
 
 if TYPE_CHECKING:
     from app.config import Settings
@@ -34,27 +39,29 @@ def create_mcp(runtime: Callable[[], Runtime], settings: Settings) -> McpBundle:
     """Build the MCP server once so its session manager shares app lifespan."""
 
     server: MCPServer[Any] = MCPServer(
-        "Docling GLM",
+        "MosaicParse",
         version=settings.version,
         instructions=(
-            "Convert PDF and image documents to Markdown or plain text. "
-            "Use auto for ordinary PDFs, ocr for scans, and vlm only for complex visual layouts. "
-            "This service does not extract financial metrics and does not provide RAG or Q&A."
+            "Parse PDF, DOCX, PPTX, images, and standalone videos into content-evidence IR. "
+            "Markdown and text are RAG-friendly projections; assets remain authenticated HTTP resources. "
+            "Embedding, chunking, indexing, question answering, and domain extraction are downstream."
         ),
     )
 
     @server.tool()
-    async def parse_document(
+    async def parse_content(
         source_url: str | None = None,
         file_base64: str | None = None,
         filename: str | None = None,
-        mode: str = "auto",
         profile: str = "balanced",
-        output_format: str = "markdown",
-        page_range: str | None = None,
-        enable_vlm_fallback: bool = False,
+        unit_range: str | None = None,
+        language: str = "zh,en",
+        description_language: str = "zh-CN",
+        include_renderings: bool = True,
+        timeout_seconds: int | None = None,
+        prefer_async: bool = False,
     ) -> dict[str, object]:
-        """Parse one HTTP(S) URL or one small base64 PDF/image."""
+        """Parse one HTTP(S) URL or one base64 document, image, or video."""
 
         if (source_url is None) == (file_base64 is None):
             return _service_error(
@@ -64,12 +71,13 @@ def create_mcp(runtime: Callable[[], Runtime], settings: Settings) -> McpBundle:
                 )
             )
         try:
-            options = DocumentParseOptions(
-                mode=ParseMode(mode),
+            options = ContentParseOptions(
                 profile=ParseProfile(profile),
-                output_format=OutputFormat(output_format),
-                page_range=page_range,
-                enable_vlm_fallback=enable_vlm_fallback,
+                unit_range=unit_range,
+                language=[item.strip() for item in language.split(",") if item.strip()],
+                description_language=description_language,  # type: ignore[arg-type]
+                include_renderings=include_renderings,
+                timeout_seconds=timeout_seconds,
             )
         except (ValueError, TypeError) as exc:
             return _service_error(ServiceError("invalid_options", str(exc), status_code=422))
@@ -88,62 +96,46 @@ def create_mcp(runtime: Callable[[], Runtime], settings: Settings) -> McpBundle:
                 return _service_error(ServiceError("empty_file", "The supplied file is empty"))
 
         job_service = runtime().job_service
-        force_job = content is not None and len(content) > settings.mcp_max_inline_bytes
         try:
-            if force_job:
-                job = await job_service.create_job(
-                    content=content,
-                    filename=filename,
-                    options=options,
-                )
+            result = await job_service.parse_content(
+                source_url=source_url,
+                content=content,
+                filename=filename,
+                options=options,
+                prefer_async=(
+                    prefer_async
+                    or bool(content is not None and len(content) > settings.mcp_max_inline_bytes)
+                ),
+            )
+            if isinstance(result, JobRecord):
                 return {
                     "delivery": "job",
-                    **JobResponse.from_record(job).model_dump(mode="json", exclude_none=True),
+                    **JobResponse.from_record(result).model_dump(mode="json", exclude_none=True),
+                }
+            response = result.evidence_ir
+            if response is None:
+                return _service_error(
+                    ServiceError("ir_missing", "content evidence IR was not produced")
+                )
+            serialized = response.model_dump_json()
+            if len(serialized) <= settings.mcp_max_result_chars:
+                return {
+                    "delivery": "inline",
+                    **response.model_dump(mode="json", exclude_none=True),
                 }
 
-            result = await job_service.parse_sync(
-                source_url=source_url,
-                content=content,
-                filename=filename,
-                options=options,
-            )
-            response = ParseResponse.from_result(result, options)
-            if len(response.content) <= settings.mcp_max_result_chars:
-                return {"delivery": "inline", **response.model_dump(mode="json", exclude_none=True)}
-
-            # Preserve complete output through the HTTP job contract. This rare
-            # branch reparses rather than silently truncating model-visible text.
-            job = await job_service.create_job(
-                source_url=source_url,
-                content=content,
-                filename=filename,
-                options=options,
-            )
+            job = await job_service.get_job(response.source.content_id)
             return {
                 "delivery": "job",
                 "message": "The result exceeds the MCP inline limit; use the result URL.",
                 **JobResponse.from_record(job).model_dump(mode="json", exclude_none=True),
             }
         except ServiceError as exc:
-            if exc.code == "sync_limit_exceeded":
-                try:
-                    job = await job_service.create_job(
-                        source_url=source_url,
-                        content=content,
-                        filename=filename,
-                        options=options,
-                    )
-                    return {
-                        "delivery": "job",
-                        **JobResponse.from_record(job).model_dump(mode="json", exclude_none=True),
-                    }
-                except ServiceError as job_exc:
-                    return _service_error(job_exc)
             return _service_error(exc)
 
     @server.tool()
-    async def get_document_job(job_id: str) -> dict[str, object]:
-        """Get the durable status of a document parsing job."""
+    async def get_content_job(job_id: str) -> dict[str, object]:
+        """Get the durable status of a content parsing job."""
 
         try:
             record = await runtime().job_service.get_job(job_id)
@@ -152,31 +144,70 @@ def create_mcp(runtime: Callable[[], Runtime], settings: Settings) -> McpBundle:
             return _service_error(exc)
 
     @server.tool()
-    async def get_document_result(job_id: str, output_format: str = "markdown") -> dict[str, object]:
-        """Get a completed job result when it is small enough for MCP."""
+    async def get_content_evidence(job_id: str) -> dict[str, object]:
+        """Get completed content-evidence IR when small enough for MCP."""
 
         try:
-            selected = OutputFormat(output_format)
-            content = await runtime().job_service.get_result(job_id, selected.value)
+            evidence = await runtime().job_service.get_evidence(job_id)
+            if len(evidence.model_dump_json()) > settings.mcp_max_result_chars:
+                return {
+                    "job_id": job_id,
+                    "delivery": "http",
+                    "result_url": f"/v1/content/jobs/{job_id}/result",
+                    "message": "The evidence IR exceeds the MCP inline limit.",
+                }
+            return {
+                "delivery": "inline",
+                **evidence.model_dump(mode="json", exclude_none=True),
+            }
+        except ServiceError as exc:
+            return _service_error(exc)
+
+    @server.tool()
+    async def get_content_rendering(job_id: str, rendering: str = "markdown") -> dict[str, object]:
+        """Get one derived Markdown or plain-text rendering."""
+
+        if rendering not in {"markdown", "text"}:
+            return _service_error(
+                ServiceError(
+                    "invalid_rendering", "rendering must be markdown or text", status_code=422
+                )
+            )
+        try:
+            content = await runtime().job_service.get_result(job_id, rendering)
             if len(content) > settings.mcp_max_result_chars:
                 return {
                     "job_id": job_id,
                     "delivery": "http",
-                    "result_url": f"/v1/documents/jobs/{job_id}/result?format={selected.value}",
-                    "message": "The result exceeds the MCP inline limit.",
+                    "result_url": f"/v1/content/jobs/{job_id}/rendering/{rendering}",
+                    "message": "The rendering exceeds the MCP inline limit.",
                 }
             return {
                 "job_id": job_id,
                 "delivery": "inline",
-                "output_format": selected.value,
+                "rendering": rendering,
                 "content": content,
             }
-        except (ValueError, ServiceError) as exc:
-            if isinstance(exc, ServiceError):
-                return _service_error(exc)
-            return _service_error(ServiceError("invalid_output_format", str(exc), status_code=422))
+        except ServiceError as exc:
+            return _service_error(exc)
 
-    @server.resource("doclingglm://health", mime_type="application/json")
+    @server.tool()
+    async def get_content_assets(job_id: str) -> dict[str, object]:
+        """List asset metadata and authenticated HTTP download URLs without base64 data."""
+
+        try:
+            evidence = await runtime().job_service.get_evidence(job_id)
+            return {
+                "job_id": job_id,
+                "assets": [
+                    asset.model_dump(mode="json", exclude_none=True) for asset in evidence.assets
+                ],
+                "bundle_url": f"/v1/content/jobs/{job_id}/bundle",
+            }
+        except ServiceError as exc:
+            return _service_error(exc)
+
+    @server.resource("mosaicparse://health", mime_type="application/json")
     async def health_resource() -> dict[str, object]:
         """Return process and queue health without secrets."""
 
@@ -189,35 +220,35 @@ def create_mcp(runtime: Callable[[], Runtime], settings: Settings) -> McpBundle:
             "queue_capacity": service.settings.max_queued_jobs,
         }
 
-    @server.resource("doclingglm://backends", mime_type="application/json")
+    @server.resource("mosaicparse://backends", mime_type="application/json")
     async def backends_resource() -> dict[str, object]:
         """Return actual Docling, GLM-OCR, and optional VLM probes."""
 
         items = await runtime().parser_service.probe_backends()
         return {"backends": [item.model_dump(mode="json", exclude_none=True) for item in items]}
 
-    @server.resource("doclingglm://usage", mime_type="text/markdown")
+    @server.resource("mosaicparse://usage", mime_type="text/markdown")
     def usage_resource() -> str:
         """Describe safe routing and the service boundary."""
 
         return (
-            "# Docling GLM usage\n\n"
-            "- Use `auto` for ordinary native PDFs.\n"
-            "- Use `ocr` for scans and document images when GLM-OCR is ready.\n"
-            "- Use `vlm` only for difficult visual layouts when the VLM backend is enabled.\n"
+            "# MosaicParse usage\n\n"
+            "- Use `profile=balanced` for ordinary documents and low latency.\n"
+            "- Use `profile=accurate` when complex layouts need visual fusion.\n"
             "- Inputs are HTTP(S) URLs or base64 data; local filesystem paths are rejected.\n"
-            "- Output is Markdown or plain text only. Financial extraction, RAG, and Q&A are out of scope."
+            "- The primary output is content-evidence IR; Markdown and text are projections.\n"
+            "- Large media assets are authenticated HTTP downloads, never inline base64.\n"
+            "- Entity, fact, relation, and event extraction are out of scope."
         )
 
     @server.prompt()
-    def document_parse_workflow(document_kind: str = "ordinary PDF") -> str:
-        """Select a conservative parse mode for a document."""
+    def content_parse_workflow(content_kind: str = "ordinary PDF") -> str:
+        """Select a parsing profile for content."""
 
         return (
-            f"Parse the {document_kind} with Docling GLM. Start with mode=auto. "
-            "Use mode=ocr only when it is scanned or image-only, and mode=vlm only when "
-            "the reading order or visual layout defeats the standard path. Return the text result "
-            "without asking this parser to extract metrics, summarize, build RAG, or answer questions."
+            f"Parse the {content_kind} with MosaicParse. Use profile=balanced for ordinary "
+            "documents or profile=accurate for complex visual evidence. Return content-evidence "
+            "IR without asking this parser to embed, index, or extract domain facts."
         )
 
     transport_security = TransportSecuritySettings(
@@ -233,4 +264,3 @@ def create_mcp(runtime: Callable[[], Runtime], settings: Settings) -> McpBundle:
         host=settings.host,
     )
     return McpBundle(server=server, app=app)
-

@@ -47,4 +47,3 @@ async def ready(request: Request, response: Response) -> ReadyResponse:
         checks=ReadyCheck(**checks),
         backends=backends,
     )
-

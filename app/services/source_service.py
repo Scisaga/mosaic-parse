@@ -37,7 +37,7 @@ class SourceService:
         self.allow_private_source_urls = bool(setting(settings, "allow_private_source_urls", False))
         self.max_redirects = int(setting(settings, "source_url_max_redirects", 3))
         self.timeout_seconds = float(setting(settings, "source_url_timeout_seconds", 30))
-        self.user_agent = str(setting(settings, "source_url_user_agent", "docling-glm-parser/0.1"))
+        self.user_agent = str(setting(settings, "source_url_user_agent", "mosaicparse/0.3"))
         self.max_upload_bytes = int(setting(settings, "max_upload_bytes", 200 * 1024 * 1024))
         self._owns_client = http_client is None
         self._client = http_client or httpx.AsyncClient(
@@ -146,12 +146,18 @@ class SourceService:
         if not self.allow_source_urls:
             raise ServiceError("source_urls_disabled", "URL sources are disabled", status_code=400)
         try:
-            validated = await validate_source_url(source_url, allow_private=self.allow_private_source_urls)
+            validated = await validate_source_url(
+                source_url, allow_private=self.allow_private_source_urls
+            )
             for redirect_count in range(self.max_redirects + 1):
                 async with self._stream_validated(validated) as response:
                     if response.status_code in {301, 302, 303, 307, 308}:
                         if redirect_count >= self.max_redirects:
-                            raise ServiceError("too_many_redirects", "source URL exceeded redirect limit", status_code=400)
+                            raise ServiceError(
+                                "too_many_redirects",
+                                "source URL exceeded redirect limit",
+                                status_code=400,
+                            )
                         validated = await validate_redirect_url(
                             validated.url,
                             response.headers.get("location", ""),
@@ -168,7 +174,11 @@ class SourceService:
                     if content_length:
                         try:
                             if int(content_length) > self.max_upload_bytes:
-                                raise ServiceError("file_too_large", "remote file exceeds the upload size limit", status_code=413)
+                                raise ServiceError(
+                                    "file_too_large",
+                                    "remote file exceeds the upload size limit",
+                                    status_code=413,
+                                )
                         except ValueError:
                             pass
                     filename = self._response_filename(response, validated.url)
@@ -181,13 +191,19 @@ class SourceService:
                         )
                     except FileValidationError as exc:
                         raise self._map_validation_error(exc) from exc
-            raise ServiceError("too_many_redirects", "source URL exceeded redirect limit", status_code=400)
+            raise ServiceError(
+                "too_many_redirects", "source URL exceeded redirect limit", status_code=400
+            )
         except SourceUrlError as exc:
             raise ServiceError(exc.code, str(exc), status_code=400) from exc
         except httpx.TimeoutException as exc:
-            raise ServiceError("source_download_timeout", "source URL download timed out", status_code=504) from exc
+            raise ServiceError(
+                "source_download_timeout", "source URL download timed out", status_code=504
+            ) from exc
         except httpx.HTTPError as exc:
-            raise ServiceError("source_download_failed", "source URL could not be downloaded", status_code=502) from exc
+            raise ServiceError(
+                "source_download_failed", "source URL could not be downloaded", status_code=502
+            ) from exc
 
     async def prepare(
         self,

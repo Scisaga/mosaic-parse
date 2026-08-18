@@ -24,8 +24,8 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{_encode_crockford(timestamp_ms, 10)}{_encode_crockford(randomness, 16)}"
 
 
-def new_document_id() -> str:
-    return new_id("docparse")
+def new_content_id() -> str:
+    return new_id("content")
 
 
 def new_job_id() -> str:
@@ -34,4 +34,3 @@ def new_job_id() -> str:
 
 def new_request_id() -> str:
     return new_id("req")
-

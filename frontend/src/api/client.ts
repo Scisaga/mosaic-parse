@@ -1,7 +1,7 @@
 import type {
   ApiErrorBody,
   BackendCapability,
-  DocumentJob,
+  ContentJob,
   JobEvent,
   JobProgress,
   ParseOptions,
@@ -10,11 +10,10 @@ import type {
   ServiceSnapshot,
   SourceSelection,
 } from '../types/api'
-import { markdownToPlainText } from '../lib/format'
 
 const configuredBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim() ?? ''
 export const API_BASE = configuredBase.replace(/\/$/, '')
-const API_KEY_STORAGE = 'docling-glm.api-key'
+const API_KEY_STORAGE = 'mosaicparse.api-key'
 
 export function getApiKey(): string {
   if (typeof sessionStorage === 'undefined') return ''
@@ -108,15 +107,11 @@ export function buildParseForm(source: SourceSelection, options: ParseOptions): 
   const data = new FormData()
   if (source.kind === 'file' && source.file) data.append('file', source.file, source.file.name)
   if (source.kind === 'url' && source.url.trim()) data.append('source_url', source.url.trim())
-  data.append('mode', options.mode)
   data.append('profile', options.profile)
-  data.append('output_format', options.outputFormat)
-  if (options.pageRange.trim()) data.append('page_range', options.pageRange.trim())
+  if (options.unitRange.trim()) data.append('unit_range', options.unitRange.trim())
   data.append('language', options.language.trim() || 'zh,en')
-  data.append('enable_vlm_fallback', String(options.enableVlmFallback))
-  data.append('preserve_page_breaks', String(options.preservePageBreaks))
-  data.append('include_pages', String(options.includePages))
-  data.append('include_diagnostics', String(options.includeDiagnostics))
+  data.append('description_language', options.descriptionLanguage)
+  data.append('include_renderings', String(options.includeRenderings))
   if (options.timeoutSeconds > 0) data.append('timeout_seconds', String(options.timeoutSeconds))
   return data
 }
@@ -128,7 +123,7 @@ function asRecord(value: unknown): Record<string, unknown> {
 function normalizeProgress(raw: unknown): JobProgress {
   const value = asRecord(raw)
   const current = Number(value.current ?? value.processed ?? value.completed ?? 0)
-  const totalValue = value.total ?? value.page_count
+  const totalValue = value.total ?? value.unit_count
   const total = totalValue === null || totalValue === undefined ? null : Number(totalValue)
   const percentValue = value.percent
   return {
@@ -140,94 +135,66 @@ function normalizeProgress(raw: unknown): JobProgress {
   }
 }
 
-function normalizeJob(raw: unknown): DocumentJob {
+function normalizeJob(raw: unknown): ContentJob {
   const value = asRecord(raw)
   const nested = value.job && typeof value.job === 'object' ? asRecord(value.job) : value
   const id = String(nested.id ?? nested.job_id ?? '')
   const rawProgress = nested.progress ?? {
-    current: nested.processed_pages,
-    total: nested.page_count,
+    current: nested.processed_units,
+    total: nested.unit_count,
     percent: nested.progress_percent,
   }
   return {
-    ...(nested as unknown as DocumentJob),
+    ...(nested as unknown as ContentJob),
     id,
-    status: (nested.status as DocumentJob['status']) ?? 'queued',
+    status: (nested.status as ContentJob['status']) ?? 'queued',
     progress: normalizeProgress(rawProgress),
   }
 }
 
-export async function createDocumentJob(source: SourceSelection, options: ParseOptions): Promise<DocumentJob> {
-  const response = await request('/v1/documents/jobs', {
+export async function createContentJob(source: SourceSelection, options: ParseOptions): Promise<ContentJob> {
+  const response = await request('/v1/content/jobs', {
     method: 'POST',
     body: buildParseForm(source, options),
   })
   return normalizeJob(await response.json())
 }
 
-export async function parseDocument(source: SourceSelection, options: ParseOptions): Promise<ParseResult> {
-  const response = await request('/v1/documents/parse', {
+export async function parseContent(source: SourceSelection, options: ParseOptions): Promise<ParseResult> {
+  const response = await request('/v1/content/parse', {
     method: 'POST',
     body: buildParseForm(source, options),
   })
-  const value = asRecord(await response.json())
+  return await response.json() as ParseResult
+}
+
+export async function getContentJob(jobId: string): Promise<ContentJob> {
+  const response = await request(`/v1/content/jobs/${encodeURIComponent(jobId)}`)
+  return normalizeJob(await response.json())
+}
+
+export async function getContentResult(jobId: string): Promise<ResultBundle> {
+  const response = await request(`/v1/content/jobs/${encodeURIComponent(jobId)}/result`)
+  const evidence = await response.json() as ParseResult
   return {
-    ...(value as unknown as ParseResult),
-    id: String(value.id ?? value.document_id ?? ''),
-    status: (value.status as ParseResult['status']) ?? 'completed',
+    evidence,
+    markdown: evidence.renderings.markdown,
+    text: evidence.renderings.plain_text,
   }
 }
 
-export async function getDocumentJob(jobId: string): Promise<DocumentJob> {
-  const response = await request(`/v1/documents/jobs/${encodeURIComponent(jobId)}`)
-  return normalizeJob(await response.json())
-}
-
-async function getResultFormat(jobId: string, format: 'markdown' | 'text'): Promise<{ content: string; metadata?: ParseResult }> {
-  const response = await request(
-    `/v1/documents/jobs/${encodeURIComponent(jobId)}/result?format=${format}&download=false`,
-    { headers: { Accept: format === 'markdown' ? 'text/markdown, application/json' : 'text/plain, application/json' } },
-  )
-  const contentType = response.headers.get('content-type') ?? ''
-  if (contentType.includes('application/json')) {
-    const raw = asRecord(await response.json())
-    const metadata: ParseResult = {
-      ...(raw as unknown as ParseResult),
-      id: String(raw.id ?? raw.document_id ?? jobId),
-      status: (raw.status as ParseResult['status']) ?? 'completed',
-    }
-    const content = String(
-      raw.content
-      ?? (format === 'markdown' ? raw.markdown : raw.plain_text)
-      ?? '',
-    )
-    return { content, metadata }
-  }
-  return { content: await response.text() }
-}
-
-export async function getDocumentResult(jobId: string): Promise<ResultBundle> {
-  const [markdownResult, textResult] = await Promise.all([
-    getResultFormat(jobId, 'markdown'),
-    getResultFormat(jobId, 'text'),
-  ])
-  const markdown = markdownResult.content
-  const text = textResult.content || markdownToPlainText(markdown)
-  return { markdown, text, metadata: markdownResult.metadata ?? textResult.metadata }
-}
-
-export async function retryDocumentJob(jobId: string, pageRange?: string): Promise<DocumentJob> {
+export async function retryContentJob(jobId: string, unitRange?: string): Promise<ContentJob> {
   const body = new FormData()
-  if (pageRange?.trim()) body.append('page_range', pageRange.trim())
-  const response = await request(`/v1/documents/jobs/${encodeURIComponent(jobId)}/retry`, {
+  if (unitRange?.trim()) body.append('unit_range', unitRange.trim())
+  const response = await request(`/v1/content/jobs/${encodeURIComponent(jobId)}/retry`, {
     method: 'POST',
-    body: pageRange?.trim() ? body : undefined,
+    body: unitRange?.trim() ? body : undefined,
   })
   return normalizeJob(await response.json())
 }
 
-export async function cancelDocumentJob(jobId: string): Promise<'cancelled' | 'deleted'> {
-  const response = await request(`/v1/documents/jobs/${encodeURIComponent(jobId)}`, { method: 'DELETE' })
+export async function cancelContentJob(jobId: string): Promise<'cancelled' | 'deleted'> {
+  const response = await request(`/v1/content/jobs/${encodeURIComponent(jobId)}`, { method: 'DELETE' })
   const body = asRecord(await response.json())
   return body.status === 'deleted' ? 'deleted' : 'cancelled'
 }
@@ -330,8 +297,8 @@ export async function fetchServiceSnapshot(): Promise<ServiceSnapshot> {
   }
 }
 
-export function jobEventsUrl(job: Pick<DocumentJob, 'id' | 'events_url'>): string {
-  return endpoint(job.events_url || `/v1/documents/jobs/${encodeURIComponent(job.id)}/events`)
+export function jobEventsUrl(job: Pick<ContentJob, 'id' | 'events_url'>): string {
+  return endpoint(job.events_url || `/v1/content/jobs/${encodeURIComponent(job.id)}/events`)
 }
 
 export function parseJobEventData(data: string, eventType = 'message'): JobEvent | null {

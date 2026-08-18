@@ -11,17 +11,22 @@ from app.lifespan import Runtime
 from app.models import (
     BackendState,
     BackendStatus,
-    DocumentParseOptions,
+    ContentParseOptions,
     DocumentParseResult,
+    PageDiagnostics,
     PageParseResult,
+    PageSourceKind,
     ParsePipeline,
     ParseUsage,
+    ParseWarning,
+    QualitySummary,
     RouteSummary,
     ServiceError,
     StoredSource,
 )
 from app.repositories import JobRepository
 from app.services.cleanup_service import CleanupService
+from app.services.ir_service import DocumentIRService
 from app.services.job_service import JobService
 from app.services.source_service import SourceService
 from app.services.storage_service import StorageService
@@ -33,6 +38,7 @@ class FakeParserService:
 
     def __init__(self) -> None:
         self.initialized = False
+        self.last_options: ContentParseOptions | None = None
 
     async def initialize(self) -> None:
         self.initialized = True
@@ -63,12 +69,13 @@ class FakeParserService:
     async def parse(
         self,
         source: StoredSource,
-        options: DocumentParseOptions,
+        options: ContentParseOptions,
         *,
         document_id: str,
         progress_callback=None,
         cancel_event=None,
     ) -> DocumentParseResult:
+        self.last_options = options
         if source.filename.startswith("fail"):
             raise ServiceError("mock_parse_failed", "Deterministic parser failure", status_code=502)
         if source.filename.startswith("slow"):
@@ -91,6 +98,15 @@ class FakeParserService:
                     content=f"# Page {page_number}\n\nValue: 12,345.67",
                     plain_text=f"Page {page_number}\n\nValue: 12,345.67",
                     duration_ms=1,
+                    warnings=[
+                        ParseWarning(
+                            code="fixture_info",
+                            message="fixture diagnostic",
+                            severity="info",
+                            page_number=page_number,
+                        )
+                    ],
+                    diagnostics=PageDiagnostics(source_kind=PageSourceKind.NATIVE),
                 )
             )
             if progress_callback is not None:
@@ -99,7 +115,7 @@ class FakeParserService:
                     await result
         markdown = "\n\n\f\n\n".join(page.content or "" for page in pages)
         plain_text = "\n\n\f\n\n".join(page.plain_text or "" for page in pages)
-        return DocumentParseResult(
+        parsed = DocumentParseResult(
             document_id=document_id,
             filename=source.filename,
             mime_type=source.mime_type,
@@ -109,13 +125,28 @@ class FakeParserService:
             plain_text=plain_text,
             pages=pages,
             pipeline=ParsePipeline(
-                mode=options.mode.value,
                 profile=options.profile.value,
                 primary="docling-standard",
             ),
             route_summary=RouteSummary(native_text_pages=len(pages), failed_pages=0),
+            warnings=[
+                ParseWarning(
+                    code="fixture_info",
+                    message="fixture diagnostic",
+                    severity="info",
+                )
+            ],
+            quality_summary=QualitySummary(trusted_pages=len(pages)),
             usage=ParseUsage(input_bytes=source.size_bytes, duration_ms=2),
         )
+        parsed.evidence_ir = DocumentIRService().build(parsed, source, {})
+        if not options.include_renderings:
+            parsed.evidence_ir.renderings.markdown = ""
+            parsed.evidence_ir.renderings.plain_text = ""
+            for page in parsed.evidence_ir.units:
+                page.renderings.markdown = ""
+                page.renderings.plain_text = ""
+        return parsed
 
 
 def make_test_settings(tmp_path: Path, **overrides: object) -> Settings:
@@ -127,9 +158,9 @@ def make_test_settings(tmp_path: Path, **overrides: object) -> Settings:
         "docling_model_download": False,
         "mcp_enabled": False,
         "max_upload_bytes": 1_000_000,
-        "max_document_pages": 20,
+        "max_content_units": 20,
         "sync_max_bytes": 1_000_000,
-        "sync_max_pages": 10,
+        "sync_max_units": 10,
         "max_queued_jobs": 4,
         "parser_workers": 1,
         "sse_heartbeat_seconds": 0.05,

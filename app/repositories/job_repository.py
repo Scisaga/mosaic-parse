@@ -8,12 +8,14 @@ normal columns.
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from app.models.job import TERMINAL_JOB_STATUSES, JobError, JobProgress, JobRecord, JobStatus
+from app.models.parse_options import ContentParseOptions
 
 
 def _utc_now() -> datetime:
@@ -28,12 +30,18 @@ class JobRepository:
         db_path: str | Path | None = None,
         settings: object | None = None,
     ) -> None:
-        source = db_path if db_path is not None else (settings if settings is not None else db_path_or_settings)
+        source = (
+            db_path
+            if db_path is not None
+            else (settings if settings is not None else db_path_or_settings)
+        )
         if isinstance(source, (str, Path)):
             candidate = Path(source)
             self.db_path = candidate if candidate.suffix == ".db" else candidate / "jobs.db"
         else:
-            configured = getattr(source, "jobs_db_path", None) or getattr(source, "database_path", None)
+            configured = getattr(source, "jobs_db_path", None) or getattr(
+                source, "database_path", None
+            )
             if configured:
                 self.db_path = Path(configured)
             else:
@@ -78,8 +86,38 @@ class JobRepository:
                     CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
                     CREATE INDEX IF NOT EXISTS idx_jobs_expires_at ON jobs(expires_at);
                     CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at);
+                    CREATE TABLE IF NOT EXISTS schema_migrations (
+                        version INTEGER PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        applied_at TEXT NOT NULL
+                    );
                     """
                 )
+                connection.execute(
+                    "INSERT OR IGNORE INTO schema_migrations(version,name,applied_at) VALUES(1,?,?)",
+                    ("initial_jobs", _utc_now().isoformat()),
+                )
+                migration_applied = connection.execute(
+                    "SELECT 1 FROM schema_migrations WHERE version=2"
+                ).fetchone()
+                if migration_applied is None:
+                    rows = connection.execute("SELECT record_json FROM jobs").fetchall()
+                    for row in rows:
+                        job, legacy = self._decode_record(row["record_json"])
+                        if legacy and job.status in {JobStatus.QUEUED, JobStatus.RUNNING}:
+                            now = _utc_now()
+                            job.status = JobStatus.FAILED
+                            job.error = JobError(
+                                code="legacy_interruption",
+                                message="legacy job was interrupted by the MosaicParse 0.3 migration",
+                            )
+                            job.updated_at = now
+                            job.completed_at = now
+                        connection.execute(self._insert_sql(replace=True), self._values(job))
+                    connection.execute(
+                        "INSERT INTO schema_migrations(version,name,applied_at) VALUES(2,?,?)",
+                        ("mosaicparse_content_contract", _utc_now().isoformat()),
+                    )
 
         async with self._lock:
             await asyncio.to_thread(initialize_sync)
@@ -143,12 +181,41 @@ class JobRepository:
 
     create_job = create
 
-    def _get_sync(self, job_id: str, connection: sqlite3.Connection | None = None) -> JobRecord | None:
+    @staticmethod
+    def _decode_record(payload: str) -> tuple[JobRecord, bool]:
+        raw = json.loads(payload)
+        if not isinstance(raw, dict):
+            raise ValueError("job record JSON root must be an object")
+        legacy = raw.get("object") != "content.parse.job"
+        raw["object"] = "content.parse.job"
+        options = raw.get("options")
+        if isinstance(options, dict):
+            normalized_options = dict(options)
+            if "page_range" in normalized_options:
+                legacy = True
+                normalized_options["unit_range"] = normalized_options.pop("page_range")
+            option_fields = set(ContentParseOptions.model_fields)
+            if set(normalized_options) - option_fields:
+                legacy = True
+            raw["options"] = {
+                key: value
+                for key, value in normalized_options.items()
+                if key in option_fields
+            }
+        record_fields = set(JobRecord.model_fields)
+        if set(raw) - record_fields:
+            legacy = True
+            raw = {key: value for key, value in raw.items() if key in record_fields}
+        return JobRecord.model_validate(raw), legacy
+
+    def _get_sync(
+        self, job_id: str, connection: sqlite3.Connection | None = None
+    ) -> JobRecord | None:
         owns_connection = connection is None
         current = connection or self._connect()
         try:
             row = current.execute("SELECT record_json FROM jobs WHERE id=?", (job_id,)).fetchone()
-            return JobRecord.model_validate_json(row["record_json"]) if row else None
+            return self._decode_record(row["record_json"])[0] if row else None
         finally:
             if owns_connection:
                 current.close()
@@ -172,7 +239,10 @@ class JobRepository:
 
         def update_sync() -> None:
             with self._connect() as connection:
-                if connection.execute("SELECT 1 FROM jobs WHERE id=?", (job.id,)).fetchone() is None:
+                if (
+                    connection.execute("SELECT 1 FROM jobs WHERE id=?", (job.id,)).fetchone()
+                    is None
+                ):
                     raise KeyError(job.id)
                 connection.execute(self._insert_sql(replace=True), self._values(job))
 
@@ -188,9 +258,9 @@ class JobRepository:
         to_status: JobStatus | str,
         *,
         error: JobError | None = None,
+        result_ir_path: str | None = None,
         result_markdown_path: str | None = None,
         result_text_path: str | None = None,
-        metadata_path: str | None = None,
     ) -> JobRecord:
         await self._ensure_initialized()
         target = JobStatus(to_status)
@@ -211,19 +281,21 @@ class JobRepository:
                     job.completed_at = now
                 if error is not None:
                     job.error = error
+                if result_ir_path is not None:
+                    job.result_ir_path = result_ir_path
                 if result_markdown_path is not None:
                     job.result_markdown_path = result_markdown_path
                 if result_text_path is not None:
                     job.result_text_path = result_text_path
-                if metadata_path is not None:
-                    job.metadata_path = metadata_path
                 connection.execute(self._insert_sql(replace=True), self._values(job))
                 return job
 
         async with self._lock:
             return await asyncio.to_thread(transition_sync)
 
-    async def update_progress(self, job_id: str, current: int, total: int, unit: str = "page") -> JobRecord:
+    async def update_progress(
+        self, job_id: str, current: int, total: int, unit: str = "page"
+    ) -> JobRecord:
         await self._ensure_initialized()
         if current < 0 or total < 0 or (total and current > total):
             raise ValueError("invalid job progress")
@@ -248,17 +320,17 @@ class JobRepository:
         self,
         job_id: str,
         *,
+        ir_path: str,
         markdown_path: str,
         text_path: str,
-        metadata_path: str,
         partial: bool = False,
     ) -> JobRecord:
         return await self.transition(
             job_id,
             JobStatus.PARTIAL if partial else JobStatus.COMPLETED,
+            result_ir_path=ir_path,
             result_markdown_path=markdown_path,
             result_text_path=text_path,
-            metadata_path=metadata_path,
         )
 
     async def fail(
@@ -268,7 +340,9 @@ class JobRepository:
         message: str,
         details: dict[str, object] | None = None,
     ) -> JobRecord:
-        return await self.transition(job_id, JobStatus.FAILED, error=JobError(code=code, message=message, details=details))
+        return await self.transition(
+            job_id, JobStatus.FAILED, error=JobError(code=code, message=message, details=details)
+        )
 
     async def cancel(self, job_id: str) -> JobRecord:
         return await self.transition(job_id, JobStatus.CANCELLED)
@@ -286,7 +360,9 @@ class JobRepository:
 
     delete_job = delete
 
-    async def list_expired(self, now: datetime | None = None, *, limit: int = 1_000) -> list[JobRecord]:
+    async def list_expired(
+        self, now: datetime | None = None, *, limit: int = 1_000
+    ) -> list[JobRecord]:
         await self._ensure_initialized()
         cutoff = (now or _utc_now()).isoformat()
 
@@ -296,7 +372,7 @@ class JobRepository:
                     "SELECT record_json FROM jobs WHERE expires_at IS NOT NULL AND expires_at <= ? ORDER BY expires_at LIMIT ?",
                     (cutoff, limit),
                 ).fetchall()
-                return [JobRecord.model_validate_json(row["record_json"]) for row in rows]
+                return [self._decode_record(row["record_json"])[0] for row in rows]
 
         async with self._lock:
             return await asyncio.to_thread(list_sync)
@@ -310,12 +386,17 @@ class JobRepository:
             count = 0
             with self._connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
-                rows = connection.execute("SELECT record_json FROM jobs WHERE status=?", (JobStatus.RUNNING.value,)).fetchall()
+                rows = connection.execute(
+                    "SELECT record_json FROM jobs WHERE status=?", (JobStatus.RUNNING.value,)
+                ).fetchall()
                 for row in rows:
-                    job = JobRecord.model_validate_json(row["record_json"])
+                    job = self._decode_record(row["record_json"])[0]
                     now = _utc_now()
                     job.status = JobStatus.FAILED
-                    job.error = JobError(code="server_restarted", message="server restarted while the job was running")
+                    job.error = JobError(
+                        code="server_restarted",
+                        message="server restarted while the job was running",
+                    )
                     job.updated_at = now
                     job.completed_at = now
                     connection.execute(self._insert_sql(replace=True), self._values(job))
@@ -325,7 +406,9 @@ class JobRepository:
         async with self._lock:
             return await asyncio.to_thread(mark_sync)
 
-    async def list(self, *, status: JobStatus | str | None = None, limit: int = 100) -> list[JobRecord]:
+    async def list(
+        self, *, status: JobStatus | str | None = None, limit: int = 100
+    ) -> list[JobRecord]:
         await self._ensure_initialized()
 
         def list_sync() -> list[JobRecord]:
@@ -338,7 +421,7 @@ class JobRepository:
             values += (limit,)
             with self._connect() as connection:
                 rows = connection.execute(sql, values).fetchall()
-                return [JobRecord.model_validate_json(row["record_json"]) for row in rows]
+                return [self._decode_record(row["record_json"])[0] for row in rows]
 
         async with self._lock:
             return await asyncio.to_thread(list_sync)

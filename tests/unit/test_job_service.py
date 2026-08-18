@@ -7,7 +7,7 @@ import pytest
 
 from app.config import Settings
 from app.models import (
-    DocumentParseOptions,
+    ContentParseOptions,
     DocumentParseResult,
     JobRecord,
     JobStatus,
@@ -15,11 +15,30 @@ from app.models import (
     ParsePipeline,
     RouteSummary,
     ServiceError,
+    StoredSource,
 )
 from app.repositories import JobRepository
+from app.services.ir_service import DocumentIRService
 from app.services.job_service import JobService
 from app.services.source_service import SourceService
 from app.services.storage_service import StorageService
+
+
+def parsed_result(source: StoredSource, document_id: str) -> DocumentParseResult:
+    parsed = DocumentParseResult(
+        document_id=document_id,
+        filename=source.filename,
+        mime_type=source.mime_type,
+        page_count=source.page_count,
+        processed_pages=1,
+        markdown="# Page 1",
+        plain_text="Page 1",
+        pages=[PageParseResult(page_number=1, backend="fake", content="# Page 1")],
+        pipeline=ParsePipeline(profile="balanced", primary="fake"),
+        route_summary=RouteSummary(failed_pages=0),
+    )
+    parsed.evidence_ir = DocumentIRService().build(parsed, source, {})
+    return parsed
 
 
 class BlockingParserService:
@@ -30,19 +49,12 @@ class BlockingParserService:
     async def initialize(self) -> None:
         return None
 
-    async def parse(self, source, options, *, document_id, progress_callback=None, cancel_event=None):
+    async def parse(
+        self, source, options, *, document_id, progress_callback=None, cancel_event=None
+    ):
         self.entered.set()
         await self.release.wait()
-        return DocumentParseResult(
-            document_id=document_id,
-            filename=source.filename,
-            mime_type=source.mime_type,
-            page_count=source.page_count,
-            processed_pages=1,
-            pages=[PageParseResult(page_number=1, backend="fake", content="# Page 1")],
-            pipeline=ParsePipeline(mode="auto", profile="balanced", primary="fake"),
-            route_summary=RouteSummary(failed_pages=0),
-        )
+        return parsed_result(source, document_id)
 
 
 class PipelineProgressParserService(BlockingParserService):
@@ -50,22 +62,15 @@ class PipelineProgressParserService(BlockingParserService):
         super().__init__()
         self.progress_emitted = asyncio.Event()
 
-    async def parse(self, source, options, *, document_id, progress_callback=None, cancel_event=None):
+    async def parse(
+        self, source, options, *, document_id, progress_callback=None, cancel_event=None
+    ):
         assert progress_callback is not None
         await progress_callback(0, source.page_count, "document.started")
         await progress_callback(1, source.page_count, "page.processed")
         self.progress_emitted.set()
         await self.release.wait()
-        return DocumentParseResult(
-            document_id=document_id,
-            filename=source.filename,
-            mime_type=source.mime_type,
-            page_count=source.page_count,
-            processed_pages=1,
-            pages=[PageParseResult(page_number=1, backend="fake", content="# Page 1")],
-            pipeline=ParsePipeline(mode="auto", profile="balanced", primary="fake"),
-            route_summary=RouteSummary(failed_pages=0),
-        )
+        return parsed_result(source, document_id)
 
 
 class PostprocessProgressParserService(BlockingParserService):
@@ -73,24 +78,19 @@ class PostprocessProgressParserService(BlockingParserService):
         super().__init__()
         self.postprocess_emitted = asyncio.Event()
 
-    async def parse(self, source, options, *, document_id, progress_callback=None, cancel_event=None):
+    async def parse(
+        self, source, options, *, document_id, progress_callback=None, cancel_event=None
+    ):
         assert progress_callback is not None
         await progress_callback(source.page_count, source.page_count, "page.completed")
         # Secondary adapters often operate on a one-page sub-range. The job
         # service must retain the whole-document total/counter for this phase.
-        await progress_callback(1, 1, "postprocess.diagram")
+        await progress_callback(1, 1, "postprocess.visual_fusion")
         self.postprocess_emitted.set()
         await self.release.wait()
-        return DocumentParseResult(
-            document_id=document_id,
-            filename=source.filename,
-            mime_type=source.mime_type,
-            page_count=source.page_count,
-            processed_pages=source.page_count,
-            pages=[PageParseResult(page_number=1, backend="fake", content="# Page 1")],
-            pipeline=ParsePipeline(mode="auto", profile="balanced", primary="fake"),
-            route_summary=RouteSummary(failed_pages=0),
-        )
+        parsed = parsed_result(source, document_id)
+        parsed.processed_pages = source.page_count
+        return parsed
 
 
 class BarrierSourceService:
@@ -117,11 +117,11 @@ def async_job_settings(tmp_path: Path) -> Settings:
         vlm_enabled=False,
         max_upload_bytes=1_000_000,
         sync_max_bytes=1_000_000,
-        sync_max_pages=10,
+        sync_max_units=10,
     )
 
 
-async def test_sync_admission_is_immediate_bounded_and_cleans_sources(tmp_path: Path) -> None:
+async def test_sync_admission_is_immediate_bounded_and_persists_jobs(tmp_path: Path) -> None:
     settings = Settings(
         _env_file=None,
         data_dir=tmp_path,
@@ -130,7 +130,7 @@ async def test_sync_admission_is_immediate_bounded_and_cleans_sources(tmp_path: 
         vlm_enabled=False,
         max_upload_bytes=1_000_000,
         sync_max_bytes=1_000_000,
-        sync_max_pages=10,
+        sync_max_units=10,
     )
     storage = StorageService(settings)
     repository = JobRepository(settings)
@@ -140,22 +140,22 @@ async def test_sync_admission_is_immediate_bounded_and_cleans_sources(tmp_path: 
     content = Path("tests/fixtures/native-report.pdf").read_bytes()
 
     first = asyncio.create_task(
-        jobs.parse_sync(filename="first.pdf", content=content, options=DocumentParseOptions())
+        jobs.parse_sync(filename="first.pdf", content=content, options=ContentParseOptions())
     )
     await parser.entered.wait()
     with pytest.raises(ServiceError) as caught:
-        await jobs.parse_sync(filename="second.pdf", content=content, options=DocumentParseOptions())
+        await jobs.parse_sync(filename="second.pdf", content=content, options=ContentParseOptions())
     assert caught.value.code == "sync_capacity_exceeded"
     assert caught.value.status_code == 429
     assert caught.value.details == {"capacity": 1}
 
     parser.release.set()
     await first
-    assert list(storage.jobs_dir.iterdir()) == []
+    assert len(list(storage.jobs_dir.iterdir())) == 1
 
     # The token is returned even through the cleanup path.
-    await jobs.parse_sync(filename="third.pdf", content=content, options=DocumentParseOptions())
-    assert list(storage.jobs_dir.iterdir()) == []
+    await jobs.parse_sync(filename="third.pdf", content=content, options=ContentParseOptions())
+    assert len(list(storage.jobs_dir.iterdir())) == 2
     await source.close()
 
 
@@ -212,7 +212,7 @@ async def test_postprocess_phase_does_not_regress_whole_document_progress(tmp_pa
     event = next(
         item
         for item in jobs._event_history[record.id]
-        if item.data.get("phase") == "postprocess.diagram"
+        if item.data.get("phase") == "postprocess.visual_fusion"
     )
     assert event.data["current"] == event.data["total"] == record.page_count
 
@@ -223,7 +223,9 @@ async def test_postprocess_phase_does_not_regress_whole_document_progress(tmp_pa
     await source.close()
 
 
-async def test_async_create_admission_precedes_prepare_and_reuses_after_dequeue(tmp_path: Path) -> None:
+async def test_async_create_admission_precedes_prepare_and_reuses_after_dequeue(
+    tmp_path: Path,
+) -> None:
     settings = async_job_settings(tmp_path)
     storage = StorageService(settings)
     repository = JobRepository(settings)
@@ -264,7 +266,9 @@ async def test_async_create_admission_precedes_prepare_and_reuses_after_dequeue(
     await real_source.close()
 
 
-async def test_retry_admission_precedes_copy_and_token_is_reusable(tmp_path: Path, monkeypatch) -> None:
+async def test_retry_admission_precedes_copy_and_token_is_reusable(
+    tmp_path: Path, monkeypatch
+) -> None:
     settings = async_job_settings(tmp_path)
     storage = StorageService(settings)
     repository = JobRepository(settings)

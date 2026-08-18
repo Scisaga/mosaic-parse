@@ -1,2 +1,1 @@
 """Model Context Protocol integration."""
-

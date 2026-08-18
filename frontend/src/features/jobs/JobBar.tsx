@@ -1,9 +1,9 @@
-import { RefreshIcon, StopIcon, TrashIcon, WarningIcon } from '../../components/Icons'
+import { RefreshIcon, StopIcon, TrashIcon } from '../../components/Icons'
 import { formatDuration, percentOf } from '../../lib/format'
-import type { DocumentJob } from '../../types/api'
+import type { ContentJob } from '../../types/api'
 
 interface JobBarProps {
-  job: DocumentJob | null
+  job: ContentJob | null
   sseState?: 'idle' | 'connecting' | 'live' | 'fallback'
   actionBusy?: boolean
   onCancel: () => void
@@ -11,7 +11,7 @@ interface JobBarProps {
   onClear: () => void
 }
 
-const STATUS_LABEL: Record<DocumentJob['status'], string> = {
+const STATUS_LABEL: Record<ContentJob['status'], string> = {
   queued: '排队中',
   running: '解析中',
   completed: '已完成',
@@ -22,7 +22,7 @@ const STATUS_LABEL: Record<DocumentJob['status'], string> = {
 
 function progressPhaseLabel(phase?: string | null): string {
   if (phase === 'postprocess.text_repair') return '修复文字'
-  if (phase === 'postprocess.diagram') return '识别图表'
+  if (phase === 'postprocess.visual_fusion') return '融合视觉证据'
   if (phase === 'page_pipeline') return '页面流水线'
   if (phase?.startsWith('page.')) return '生成结果'
   return '页面'
@@ -35,8 +35,6 @@ export function JobBar({ job, sseState = 'idle', actionBusy = false, onCancel, o
   const percent = percentOf(job.progress.current, job.progress.total, job.progress.percent)
   const active = job.status === 'queued' || job.status === 'running'
   const retryable = job.status === 'failed' || job.status === 'partial' || job.status === 'cancelled'
-  const backend = [job.pipeline?.primary, job.pipeline?.ocr, job.pipeline?.vlm].filter(Boolean).join(' + ') || '—'
-  const warningCount = job.warnings?.length ?? 0
   const progressLabel = progressPhaseLabel(job.progress.phase)
   return (
     <footer className="job-bar" aria-live="polite">
@@ -50,9 +48,9 @@ export function JobBar({ job, sseState = 'idle', actionBusy = false, onCancel, o
       </div>
       <div className="job-facts">
         <span><small>已处理</small>{job.progress.current}/{job.progress.total ?? '—'}</span>
-        <span><small>后端</small><b title={backend}>{backend}</b></span>
-        <span><small>耗时</small>{formatDuration(job.usage?.duration_ms)}</span>
-        <span><small>告警</small>{warningCount ? <b className="warning-count"><WarningIcon /> {warningCount}</b> : '0'}</span>
+        <span><small>档位</small><b>{job.options?.profile ?? '—'}</b></span>
+        <span><small>耗时</small>{formatDuration(job.started_at && job.completed_at ? Date.parse(job.completed_at) - Date.parse(job.started_at) : null)}</span>
+        <span><small>尝试</small>{job.attempt ?? 1}</span>
       </div>
       <div className="job-actions">
         {active && <button type="button" className="secondary-button danger-button" onClick={onCancel} disabled={actionBusy}><StopIcon />取消</button>}

@@ -24,4 +24,3 @@ class Timer(AbstractContextManager["Timer"]):
     def elapsed_ms(self) -> int:
         end = self.ended or time.perf_counter()
         return max(0, round((end - self.started) * 1000))
-

@@ -3,14 +3,14 @@ requires = ["hatchling==1.28.0"]
 build-backend = "hatchling.build"
 
 [project]
-name = "docling-glm-parser"
-version = "0.1.0"
-description = "Self-hosted document-to-Markdown/Text service powered by Docling and GLM-OCR"
+name = "mosaicparse"
+version = "0.3.0"
+description = "Self-hosted multimodal content evidence parser for external RAG systems"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 license = "Apache-2.0"
-authors = [{ name = "Docling GLM contributors" }]
-keywords = ["docling", "glm-ocr", "ocr", "pdf", "markdown"]
+authors = [{ name = "MosaicParse contributors" }]
+keywords = ["multimodal", "rag", "docling", "ocr", "pdf", "video"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Framework :: FastAPI",
@@ -42,12 +42,13 @@ dependencies = [
 ]
 
 [project.urls]
-Documentation = "https://github.com/scisaga/docling-glm-parser#readme"
-Issues = "https://github.com/scisaga/docling-glm-parser/issues"
-Repository = "https://github.com/scisaga/docling-glm-parser"
+Documentation = "https://github.com/Scisaga/mosaic-parse#readme"
+Issues = "https://github.com/Scisaga/mosaic-parse/issues"
+Repository = "https://github.com/Scisaga/mosaic-parse"
 
 [dependency-groups]
 dev = [
+  "cairosvg==2.8.2",
   "mypy==2.3.0",
   "pytest==9.1.1",
   "pytest-asyncio==1.4.0",
@@ -104,4 +105,3 @@ pretty = true
 show_error_codes = true
 warn_redundant_casts = true
 warn_unused_ignores = true
-

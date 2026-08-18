@@ -41,6 +41,9 @@ playwright-report/
 test-results/
 /tmp/
 
+# Private PDF quality corpus and local evaluation records
+/pdf_sample/
+
 # Locally governed acceptance corpus (not part of the original fixtures)
 /tests/fixtures/progress-pages/
 

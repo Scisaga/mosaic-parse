@@ -50,7 +50,9 @@ def _error_response(
             details=details,
         )
     )
-    return JSONResponse(status_code=status_code, content=payload.model_dump(mode="json", exclude_none=True))
+    return JSONResponse(
+        status_code=status_code, content=payload.model_dump(mode="json", exclude_none=True)
+    )
 
 
 def _static_directory(settings: Settings) -> Path | None:
@@ -75,7 +77,9 @@ def create_app(
     def current_runtime():
         runtime = runtime_ref.get("runtime")
         if runtime is None:
-            raise ServiceError("service_not_ready", "The parser service is still starting", status_code=503)
+            raise ServiceError(
+                "service_not_ready", "The parser service is still starting", status_code=503
+            )
         return runtime
 
     mcp_bundle: McpBundle | None = None
@@ -83,11 +87,12 @@ def create_app(
         mcp_bundle = create_mcp(current_runtime, current_settings)
 
     application = FastAPI(
-        title="Docling GLM",
-        summary="Self-hosted PDF/image to Markdown or plain-text parser",
+        title="MosaicParse",
+        summary="Self-hosted multimodal content evidence parser for external RAG systems",
         description=(
-            "An independent community service powered by Docling with optional remote GLM-OCR "
-            "and VLM backends. It does not perform metric extraction, RAG, summarization, or Q&A."
+            "An independent multimodal parsing service with Docling, optional GLM-OCR, and VLM "
+            "backends. It produces evidence and assets, but does not perform embedding, chunking, "
+            "indexing, question answering, or domain entity extraction."
         ),
         version=current_settings.version,
         docs_url="/docs",
@@ -126,8 +131,18 @@ def create_app(
     @application.middleware("http")
     async def request_context(request: Request, call_next):
         incoming = request.headers.get("X-Request-ID")
-        request.state.request_id = incoming if incoming and _REQUEST_ID_RE.fullmatch(incoming) else new_request_id()
+        request.state.request_id = (
+            incoming if incoming and _REQUEST_ID_RE.fullmatch(incoming) else new_request_id()
+        )
         started = time.perf_counter()
+
+        if request.url.path == "/v1/documents" or request.url.path.startswith("/v1/documents/"):
+            return _error_response(
+                status_code=404,
+                code="not_found",
+                message="Not Found",
+                request_id=request.state.request_id,
+            )
 
         if request.url.path == "/mcp" or request.url.path.startswith("/mcp/"):
             provided = extract_bearer_token(
@@ -167,7 +182,9 @@ def create_app(
         )
 
     @application.exception_handler(RequestValidationError)
-    async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    async def validation_error_handler(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
         errors = [
             {
                 "location": [str(item) for item in error.get("loc", ())],
@@ -231,10 +248,11 @@ def create_app(
     if static_directory is not None:
         application.mount("/", StaticFiles(directory=static_directory, html=True), name="frontend")
     else:
+
         @application.get("/", include_in_schema=False)
         async def development_root() -> HTMLResponse:
             return HTMLResponse(
-                "<h1>Docling GLM</h1><p>Frontend assets are not built. "
+                "<h1>MosaicParse</h1><p>Frontend assets are not built. "
                 '<a href="/docs">Open the API documentation</a>.</p>'
             )
 

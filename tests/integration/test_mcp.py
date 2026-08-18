@@ -20,27 +20,31 @@ async def test_mcp_tools_resources_and_prompt(tmp_path: Path, native_pdf: Path) 
         async with Client(bundle.server) as client:
             tools = await client.list_tools()
             assert {tool.name for tool in tools.tools} == {
-                "parse_document",
-                "get_document_job",
-                "get_document_result",
+                "parse_content",
+                "get_content_job",
+                "get_content_evidence",
+                "get_content_rendering",
+                "get_content_assets",
             }
 
             result = await client.call_tool(
-                "parse_document",
+                "parse_content",
                 {
                     "file_base64": base64.b64encode(native_pdf.read_bytes()).decode(),
                     "filename": "native-report.pdf",
-                    "mode": "auto",
-                    "output_format": "markdown",
+                    "profile": "accurate",
                 },
             )
             assert result.is_error is False
             assert result.structured_content is not None
             assert result.structured_content["delivery"] == "inline"
-            assert "12,345.67" in result.structured_content["content"]
+            assert result.structured_content["object"] == "content.evidence"
+            assert "12,345.67" in result.structured_content["renderings"]["markdown"]
+            assert runtime.parser_service.last_options is not None
+            assert runtime.parser_service.last_options.resolved_vlm_policy.value == "auto_visual"
 
             invalid = await client.call_tool(
-                "parse_document",
+                "parse_content",
                 {"source_url": "https://8.8.8.8/report.pdf", "file_base64": "QQ=="},
             )
             assert invalid.structured_content is not None
@@ -48,20 +52,21 @@ async def test_mcp_tools_resources_and_prompt(tmp_path: Path, native_pdf: Path) 
 
             resources = await client.list_resources()
             assert {str(item.uri) for item in resources.resources} == {
-                "doclingglm://health",
-                "doclingglm://backends",
-                "doclingglm://usage",
+                "mosaicparse://health",
+                "mosaicparse://backends",
+                "mosaicparse://usage",
             }
-            health = await client.read_resource("doclingglm://health")
+            health = await client.read_resource("mosaicparse://health")
             assert "queue_capacity" in health.contents[0].text
 
             prompts = await client.list_prompts()
-            assert [prompt.name for prompt in prompts.prompts] == ["document_parse_workflow"]
+            assert [prompt.name for prompt in prompts.prompts] == ["content_parse_workflow"]
             prompt = await client.get_prompt(
-                "document_parse_workflow",
-                {"document_kind": "scanned statement"},
+                "content_parse_workflow",
+                {"content_kind": "scanned statement"},
             )
-            assert "mode=ocr" in prompt.messages[0].content.text
+            assert "profile=accurate" in prompt.messages[0].content.text
+            assert "content-evidence IR" in prompt.messages[0].content.text
     finally:
         await runtime.close()
 
@@ -78,7 +83,7 @@ async def test_mcp_large_input_returns_durable_job(tmp_path: Path, native_pdf: P
         bundle = create_mcp(lambda: runtime, settings)
         async with Client(bundle.server) as client:
             result = await client.call_tool(
-                "parse_document",
+                "parse_content",
                 {
                     "file_base64": base64.b64encode(native_pdf.read_bytes()).decode(),
                     "filename": "native-report.pdf",
@@ -121,4 +126,4 @@ def test_streamable_http_is_exactly_mounted_at_mcp_and_uses_api_key(tmp_path: Pa
             headers={"Accept": accept, "X-API-Key": "mcp-secret"},
         )
         assert response.status_code == 200
-        assert response.json()["result"]["serverInfo"]["name"] == "Docling GLM"
+        assert response.json()["result"]["serverInfo"]["name"] == "MosaicParse"

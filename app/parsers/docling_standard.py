@@ -6,15 +6,16 @@ import asyncio
 import inspect
 import logging
 import queue
+import re
 import threading
 import time
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
 from app.models.backend import BackendState, BackendStatus
-from app.models.parse_options import DocumentParseOptions, ParseMode, ParseProfile
+from app.models.parse_options import ContentParseOptions, ParseProfile
 from app.models.parse_result import (
     DocumentParseResult,
     PageParseResult,
@@ -34,6 +35,7 @@ from app.parsers.base import (
     ProgressCallback,
 )
 from app.parsers.glm_ocr_remote import GlmOcrRemoteAdapter
+from app.services.table_service import export_page_markdown, extract_table_fragments
 from app.utils.page_range import group_consecutive_pages, parse_page_range
 from app.utils.settings import setting
 
@@ -63,18 +65,18 @@ class _ObservableStandardPdfPipelineMixin:
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)
-        self._docling_glm_progress_lock = threading.Lock()
-        self._docling_glm_progress_sink: queue.Queue[int] | None = None
+        self._mosaicparse_progress_lock = threading.Lock()
+        self._mosaicparse_progress_sink: queue.Queue[int] | None = None
 
     def set_page_progress_sink(self, sink: queue.Queue[int] | None) -> None:
-        with self._docling_glm_progress_lock:
-            self._docling_glm_progress_sink = sink
+        with self._mosaicparse_progress_lock:
+            self._mosaicparse_progress_sink = sink
 
     def _release_page_resources(self, item: object) -> None:
         super()._release_page_resources(item)  # type: ignore[misc]
         page_number = getattr(item, "page_no", None)
-        with self._docling_glm_progress_lock:
-            sink = self._docling_glm_progress_sink
+        with self._mosaicparse_progress_lock:
+            sink = self._mosaicparse_progress_sink
         if sink is not None and isinstance(page_number, int) and page_number > 0:
             sink.put(page_number)
 
@@ -103,7 +105,9 @@ class DoclingStandardParser(DocumentParser):
         self._available_slots: asyncio.Queue[int] = asyncio.Queue(maxsize=self._worker_count)
         for slot in range(self._worker_count):
             self._available_slots.put_nowait(slot)
-        self._converters: OrderedDict[tuple[int, str, bool, tuple[str, ...], bool], object] = OrderedDict()
+        self._converters: OrderedDict[tuple[int, str, bool, tuple[str, ...], bool], object] = (
+            OrderedDict()
+        )
         self._inflight_conversions: set[asyncio.Task[object]] = set()
         self._dependency_error: str | None = None
         self._initialized = False
@@ -116,7 +120,9 @@ class DoclingStandardParser(DocumentParser):
         try:
             # Import only during application startup; importing this module itself
             # remains cheap and works in API-only/test environments.
-            await asyncio.to_thread(__import__, "docling.document_converter", fromlist=["DocumentConverter"])
+            await asyncio.to_thread(
+                __import__, "docling.document_converter", fromlist=["DocumentConverter"]
+            )
             glm_status = await self.glm_adapter.probe()
             languages = list(getattr(self.settings, "default_languages", None) or ["zh", "en"])
             # Build and initialize every configured worker's balanced pipeline.
@@ -204,12 +210,20 @@ class DoclingStandardParser(DocumentParser):
         )
         from docling.document_converter import DocumentConverter, ImageFormatOption, PdfFormatOption
 
-        configured_artifacts = Path(setting(self.settings, "docling_artifacts_path", "/models/docling"))
+        configured_artifacts = Path(
+            setting(self.settings, "docling_artifacts_path", "/models/docling")
+        )
         allow_download = bool(setting(self.settings, "docling_model_download", True))
         if not allow_download and not configured_artifacts.is_dir():
-            raise FileNotFoundError(f"Docling artifacts path does not exist: {configured_artifacts}")
-        has_prefetched_artifacts = configured_artifacts.is_dir() and any(configured_artifacts.iterdir())
-        artifacts_path: Path | None = configured_artifacts if has_prefetched_artifacts or not allow_download else None
+            raise FileNotFoundError(
+                f"Docling artifacts path does not exist: {configured_artifacts}"
+            )
+        has_prefetched_artifacts = configured_artifacts.is_dir() and any(
+            configured_artifacts.iterdir()
+        )
+        artifacts_path: Path | None = (
+            configured_artifacts if has_prefetched_artifacts or not allow_download else None
+        )
         if artifacts_path is None:
             # Docling itself reads DOCLING_ARTIFACTS_PATH into a process-global
             # setting. If that variable names a fresh/empty Compose volume it
@@ -225,7 +239,11 @@ class DoclingStandardParser(DocumentParser):
         elif profile == ParseProfile.ACCURATE:
             scale = max(scale, 3.0)
         configured_table_mode = str(setting(self.settings, "docling_table_mode", "accurate"))
-        table_mode = TableFormerMode.FAST if profile == ParseProfile.FAST or configured_table_mode == "fast" else TableFormerMode.ACCURATE
+        table_mode = (
+            TableFormerMode.FAST
+            if profile == ParseProfile.FAST or configured_table_mode == "fast"
+            else TableFormerMode.ACCURATE
+        )
         device = str(setting(self.settings, "docling_device", "cpu"))
         if device.startswith("cuda"):
             import torch
@@ -239,17 +257,24 @@ class DoclingStandardParser(DocumentParser):
             allow_external_plugins=bool(glm_ready),
             enable_remote_services=bool(glm_ready),
             artifacts_path=artifacts_path,
-            document_timeout=float(setting(self.settings, "document_timeout_seconds", 900)),
+            document_timeout=float(setting(self.settings, "content_timeout_seconds", 900)),
             accelerator_options=AcceleratorOptions(device=device),
         )
         # torch.compile has a very large first-document cost on the default CPU
         # deployment. It remains opt-in for sustained-throughput installations.
         layout_engine_options = cast(Any, pipeline_options.layout_options).engine_options
         if hasattr(layout_engine_options, "compile_model"):
-            layout_engine_options.compile_model = bool(setting(self.settings, "docling_compile_models", False))
+            layout_engine_options.compile_model = bool(
+                setting(self.settings, "docling_compile_models", False)
+            )
         cast(TableStructureOptions, pipeline_options.table_structure_options).mode = table_mode
+        cast(
+            TableStructureOptions, pipeline_options.table_structure_options
+        ).do_cell_matching = bool(setting(self.settings, "docling_do_cell_matching", True))
         if hasattr(pipeline_options, "force_backend_text"):
-            pipeline_options.force_backend_text = bool(setting(self.settings, "docling_force_backend_text", False))
+            pipeline_options.force_backend_text = bool(
+                setting(self.settings, "docling_force_backend_text", False)
+            )
         if glm_ready:
             pipeline_options.ocr_options = self.glm_adapter.build_options(
                 languages=languages,
@@ -267,11 +292,16 @@ class DoclingStandardParser(DocumentParser):
         )
         return DocumentConverter(
             allowed_formats=[InputFormat.PDF, InputFormat.IMAGE],
-            format_options={InputFormat.PDF: pdf_format_option, InputFormat.IMAGE: image_format_option},
+            format_options={
+                InputFormat.PDF: pdf_format_option,
+                InputFormat.IMAGE: image_format_option,
+            },
         )
 
     @staticmethod
-    async def _notify(callback: ProgressCallback | None, current: int, total: int, state: str) -> None:
+    async def _notify(
+        callback: ProgressCallback | None, current: int, total: int, state: str
+    ) -> None:
         if callback is None:
             return
         result = callback(current, total, state)
@@ -282,10 +312,84 @@ class DoclingStandardParser(DocumentParser):
     def _conversion_error_messages(conversion: object) -> list[str]:
         messages: list[str] = []
         for error in getattr(conversion, "errors", []) or []:
-            text = getattr(error, "error_message", None) or getattr(error, "message", None) or str(error)
+            text = (
+                getattr(error, "error_message", None)
+                or getattr(error, "message", None)
+                or str(error)
+            )
             if text:
                 messages.append(str(text)[:1_000])
         return messages
+
+    @staticmethod
+    def _overlapping_text_duplicate_counts(
+        document: object,
+        page_group: tuple[int, int],
+    ) -> dict[int, Counter[str]]:
+        """Count only identical text items whose provenance boxes overlap almost exactly."""
+
+        iterator = getattr(document, "iterate_items", None)
+        if not callable(iterator):
+            return {}
+        seen: dict[tuple[int, str], list[tuple[float, float, float, float]]] = {}
+        duplicates: dict[int, Counter[str]] = {}
+        for item, _level in iterator():
+            text = re.sub(r"\s+", " ", str(getattr(item, "text", "") or "")).strip()
+            provenance = getattr(item, "prov", None) or []
+            if not text or not provenance:
+                continue
+            prov = provenance[0]
+            page_number = getattr(prov, "page_no", None)
+            if (
+                not isinstance(page_number, int)
+                or not page_group[0] <= page_number <= page_group[1]
+            ):
+                continue
+            box = getattr(prov, "bbox", None)
+            if box is None:
+                continue
+            left = float(getattr(box, "l", 0.0))
+            right = float(getattr(box, "r", 0.0))
+            top = float(getattr(box, "t", 0.0))
+            bottom = float(getattr(box, "b", 0.0))
+            bbox = (min(left, right), min(top, bottom), max(left, right), max(top, bottom))
+            area = max(0.0, bbox[2] - bbox[0]) * max(0.0, bbox[3] - bbox[1])
+            if area <= 0:
+                continue
+            key = (page_number, text)
+            is_duplicate = False
+            for previous in seen.get(key, []):
+                intersection = max(
+                    0.0, min(bbox[2], previous[2]) - max(bbox[0], previous[0])
+                ) * max(0.0, min(bbox[3], previous[3]) - max(bbox[1], previous[1]))
+                previous_area = max(0.0, previous[2] - previous[0]) * max(
+                    0.0, previous[3] - previous[1]
+                )
+                union = area + previous_area - intersection
+                if union > 0 and intersection / union >= 0.80:
+                    is_duplicate = True
+                    break
+            seen.setdefault(key, []).append(bbox)
+            if is_duplicate:
+                duplicates.setdefault(page_number, Counter())[text] += 1
+        return duplicates
+
+    @staticmethod
+    def _remove_overlapping_text_duplicates(markdown: str, duplicates: Counter[str]) -> str:
+        if not duplicates:
+            return markdown
+        remaining = duplicates.copy()
+        seen: Counter[str] = Counter()
+        output: list[str] = []
+        for line in markdown.splitlines():
+            normalized = re.sub(r"\s+", " ", re.sub(r"^\s*(?:#{1,6}|[-+*])\s+", "", line)).strip()
+            if normalized in remaining:
+                seen[normalized] += 1
+                if seen[normalized] > 1 and remaining[normalized] > 0:
+                    remaining[normalized] -= 1
+                    continue
+            output.append(line)
+        return "\n".join(output)
 
     @staticmethod
     def _extract_picture_candidates(
@@ -317,7 +421,9 @@ class DoclingStandardParser(DocumentParser):
                 continue
             provenance = item.prov[0]
             page_number = provenance.page_no
-            if not isinstance(page_number, int) or not (page_group[0] <= page_number <= page_group[1]):
+            if not isinstance(page_number, int) or not (
+                page_group[0] <= page_number <= page_group[1]
+            ):
                 continue
             placeholder_index = ordinals.get(page_number, 0)
             ordinals[page_number] = placeholder_index + 1
@@ -369,7 +475,7 @@ class DoclingStandardParser(DocumentParser):
         worker_slot: int,
         source: StoredSource,
         page_group: tuple[int, int],
-        options: DocumentParseOptions,
+        options: ContentParseOptions,
         force_ocr: bool,
         glm_ready: bool,
         progress_sink: queue.Queue[int] | None = None,
@@ -436,7 +542,7 @@ class DoclingStandardParser(DocumentParser):
     async def parse(
         self,
         source: StoredSource,
-        options: DocumentParseOptions,
+        options: ContentParseOptions,
         *,
         document_id: str,
         progress_callback: ProgressCallback | None = None,
@@ -451,21 +557,14 @@ class DoclingStandardParser(DocumentParser):
         pages = parse_page_range(options.page_range, source.page_count)
         page_groups = group_consecutive_pages(pages)
         glm_status = await self.glm_adapter.probe()
-        if options.mode == ParseMode.OCR and not glm_status.ready:
-            raise ParserUnavailableError(
-                "OCR mode requires a ready GLM-OCR backend",
-                details={
-                    "backend": self.glm_adapter.name,
-                    "state": glm_status.state.value,
-                },
-            )
-        force_ocr = options.mode == ParseMode.OCR
+        force_ocr = False
         started = time.perf_counter()
         await self._notify(progress_callback, 0, len(pages), "document.started")
         worker_slot = await self._available_slots.get()
         release_slot = True
         parsed_pages: list[PageParseResult] = []
         picture_candidates: list[PictureCandidate] = []
+        table_fragments: list[object] = []
         completed_count = 0
         page_backend = self.glm_adapter.name if force_ocr else self.name
         try:
@@ -527,22 +626,42 @@ class DoclingStandardParser(DocumentParser):
                 status_text = str(getattr(conversion, "status", "success")).lower()
                 if status_text.endswith("failure") or status_text.endswith("skipped"):
                     messages = self._conversion_error_messages(conversion)
-                    raise ParserError("Docling reported conversion failure", details={"errors": messages})
+                    raise ParserError(
+                        "Docling reported conversion failure", details={"errors": messages}
+                    )
                 document = getattr(conversion, "document", None)
                 if document is None:
                     raise ParserError("Docling returned no document")
                 error_messages = self._conversion_error_messages(conversion)
-                if options.mode == ParseMode.AUTO:
-                    picture_candidates.extend(self._extract_picture_candidates(document, page_group))
+                picture_candidates.extend(self._extract_picture_candidates(document, page_group))
+                group_table_fragments = extract_table_fragments(document, page_group)
+                table_fragments.extend(group_table_fragments)
+                overlapping_duplicates = self._overlapping_text_duplicate_counts(
+                    document, page_group
+                )
 
                 for page_number in range(page_group[0], page_group[1] + 1):
                     if self._cancelled(cancel_event):
                         raise ParserCancelledError("job was cancelled")
                     page_started = time.perf_counter()
                     try:
-                        markdown = await asyncio.to_thread(document.export_to_markdown, page_no=page_number)
+                        markdown = await asyncio.to_thread(
+                            export_page_markdown,
+                            document,
+                            page_number,
+                            group_table_fragments,
+                        )
+                        duplicate_counts = overlapping_duplicates.get(page_number, Counter())
+                        markdown = self._remove_overlapping_text_duplicates(
+                            markdown,
+                            duplicate_counts,
+                        )
                         export_text = getattr(document, "export_to_text", None)
-                        plain_text = await asyncio.to_thread(export_text, page_no=page_number) if export_text else None
+                        plain_text = (
+                            await asyncio.to_thread(export_text, page_no=page_number)
+                            if export_text
+                            else None
+                        )
                         page_warnings: list[ParseWarning] = []
                         page_status = PageStatus.COMPLETED
                         if error_messages:
@@ -556,6 +675,44 @@ class DoclingStandardParser(DocumentParser):
                                     details={"errors": error_messages[:5]},
                                 )
                             )
+                        invalid_tables = [
+                            fragment
+                            for fragment in group_table_fragments
+                            if fragment.page_number == page_number and not fragment.valid
+                        ]
+                        if invalid_tables:
+                            page_status = PageStatus.WARNING
+                            page_warnings.append(
+                                ParseWarning(
+                                    code="table_structure_invalid",
+                                    message="one or more Docling tables contain invalid or overlapping cell spans",
+                                    page_number=page_number,
+                                    backend=self.name,
+                                    details={
+                                        "fragments": [
+                                            {
+                                                "id": fragment.fragment_id,
+                                                "reasons": fragment.invalid_reasons,
+                                            }
+                                            for fragment in invalid_tables
+                                        ]
+                                    },
+                                )
+                            )
+                        if duplicate_counts:
+                            page_warnings.append(
+                                ParseWarning(
+                                    code="overlapping_ocr_boxes_deduplicated",
+                                    message="identical text from highly overlapping OCR boxes was emitted once",
+                                    severity=WarningSeverity.INFO,
+                                    page_number=page_number,
+                                    backend=self.name,
+                                    details={
+                                        "removed_items": sum(duplicate_counts.values()),
+                                        "minimum_iou": 0.8,
+                                    },
+                                )
+                            )
                         parsed_pages.append(
                             PageParseResult(
                                 page_number=page_number,
@@ -563,7 +720,9 @@ class DoclingStandardParser(DocumentParser):
                                 backend=page_backend,
                                 content=str(markdown or ""),
                                 plain_text=str(plain_text) if plain_text is not None else None,
-                                duration_ms=max(0, round((time.perf_counter() - page_started) * 1000)),
+                                duration_ms=max(
+                                    0, round((time.perf_counter() - page_started) * 1000)
+                                ),
                                 warnings=page_warnings,
                             )
                         )
@@ -573,7 +732,9 @@ class DoclingStandardParser(DocumentParser):
                                 page_number=page_number,
                                 status=PageStatus.FAILED,
                                 backend=page_backend,
-                                duration_ms=max(0, round((time.perf_counter() - page_started) * 1000)),
+                                duration_ms=max(
+                                    0, round((time.perf_counter() - page_started) * 1000)
+                                ),
                                 warnings=[
                                     ParseWarning(
                                         code="page_export_failed",
@@ -602,7 +763,7 @@ class DoclingStandardParser(DocumentParser):
                 self._available_slots.put_nowait(worker_slot)
 
         warnings: list[ParseWarning] = []
-        if not glm_status.ready and options.mode in {ParseMode.AUTO, ParseMode.STANDARD}:
+        if not glm_status.ready:
             warnings.append(
                 ParseWarning(
                     code="glm_ocr_unavailable",
@@ -631,7 +792,6 @@ class DoclingStandardParser(DocumentParser):
             plain_text="",
             pages=parsed_pages,
             pipeline=ParsePipeline(
-                mode=options.mode.value,
                 profile=options.profile.value,
                 primary=self.name,
                 ocr=self.glm_adapter.name if glm_status.ready else None,
@@ -641,6 +801,7 @@ class DoclingStandardParser(DocumentParser):
             usage=ParseUsage(input_bytes=source.size_bytes, duration_ms=elapsed),
         )
         result._picture_candidates = list(picture_candidates)
+        result._table_fragments = list(table_fragments)
         return result
 
     async def close(self) -> None:

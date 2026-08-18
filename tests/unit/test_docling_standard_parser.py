@@ -19,12 +19,10 @@ from docling_core.types.doc import (
 from app.models import (
     BackendState,
     BackendStatus,
-    DocumentParseOptions,
-    ParseMode,
+    ContentParseOptions,
     ParseProfile,
     StoredSource,
 )
-from app.parsers.base import ParserUnavailableError
 from app.parsers.docling_standard import DoclingStandardParser
 
 
@@ -35,7 +33,9 @@ class StubGlmAdapter:
         self.state = state
 
     async def probe(self, *, force: bool = False) -> BackendStatus:
-        return BackendStatus(name=self.name, state=self.state, enabled=self.state != BackendState.DISABLED)
+        return BackendStatus(
+            name=self.name, state=self.state, enabled=self.state != BackendState.DISABLED
+        )
 
 
 class FakeDocument:
@@ -90,7 +90,7 @@ class PipelineProgressParser(DoclingStandardParser):
         worker_slot: int,
         source: StoredSource,
         page_group: tuple[int, int],
-        options: DocumentParseOptions,
+        options: ContentParseOptions,
         force_ocr: bool,
         glm_ready: bool,
         progress_sink: queue.Queue[int] | None = None,
@@ -181,7 +181,7 @@ async def test_sparse_page_range_is_converted_as_independent_groups() -> None:
 
     result = await parser.parse(
         source(),
-        DocumentParseOptions(mode=ParseMode.STANDARD, page_range="1,1000"),
+        ContentParseOptions(unit_range="1,1000"),
         document_id="docparse_sparse",
         progress_callback=report,
     )
@@ -209,7 +209,7 @@ async def test_contiguous_conversion_streams_real_pipeline_page_progress() -> No
 
     result = await parser.parse(
         source(3),
-        DocumentParseOptions(mode=ParseMode.STANDARD),
+        ContentParseOptions(),
         document_id="docparse_streaming_progress",
         progress_callback=report,
     )
@@ -238,7 +238,7 @@ async def test_cancelled_conversion_keeps_worker_slot_until_thread_exits() -> No
     parsing = asyncio.create_task(
         parser.parse(
             source(1),
-            DocumentParseOptions(mode=ParseMode.STANDARD),
+            ContentParseOptions(),
             document_id="docparse_cancelled_slot",
         )
     )
@@ -254,48 +254,7 @@ async def test_cancelled_conversion_keeps_worker_slot_until_thread_exits() -> No
     assert parser._available_slots.qsize() == 1
 
 
-async def test_ocr_mode_fails_before_conversion_when_glm_is_not_ready() -> None:
-    adapter = StubGlmAdapter(BackendState.DISABLED)
-    parser = DoclingStandardParser(SimpleNamespace(parser_workers=1), adapter)  # type: ignore[arg-type]
-    parser._initialized = True
-
-    with pytest.raises(ParserUnavailableError) as caught:
-        await parser.parse(
-            source(1),
-            DocumentParseOptions(mode=ParseMode.OCR),
-            document_id="docparse_ocr_gate",
-        )
-
-    assert caught.value.details == {"backend": "glm-ocr-remote", "state": "disabled"}
-    assert parser._converters == {}
-
-
-async def test_full_page_ocr_reports_observable_glm_routing() -> None:
-    adapter = StubGlmAdapter(BackendState.READY)
-    parser = DoclingStandardParser(SimpleNamespace(parser_workers=1), adapter)  # type: ignore[arg-type]
-    parser._initialized = True
-    converter = RecordingConverter()
-    key = (0, ParseProfile.BALANCED.value, True, ("zh", "en"), True)
-    parser._converters[key] = converter
-
-    result = await parser.parse(
-        source(1),
-        DocumentParseOptions(mode=ParseMode.OCR),
-        document_id="docparse_ocr_routing",
-    )
-
-    assert result.pages[0].backend == "glm-ocr-remote"
-    assert result.route_summary.model_dump() == {
-        "native_text_pages": 0,
-        "pages_with_ocr": 1,
-        "ocr_regions": 1,
-        "vlm_pages": 0,
-        "failed_pages": 0,
-    }
-
-
-@pytest.mark.parametrize("mode", [ParseMode.AUTO, ParseMode.STANDARD])
-async def test_non_ocr_modes_degrade_with_a_real_warning(mode: ParseMode) -> None:
+async def test_automatic_route_reports_unavailable_optional_glm() -> None:
     adapter = StubGlmAdapter(BackendState.UNAVAILABLE)
     parser = DoclingStandardParser(SimpleNamespace(parser_workers=1), adapter)  # type: ignore[arg-type]
     parser._initialized = True
@@ -303,7 +262,7 @@ async def test_non_ocr_modes_degrade_with_a_real_warning(mode: ParseMode) -> Non
     key = (0, ParseProfile.BALANCED.value, False, ("zh", "en"), False)
     parser._converters[key] = converter
 
-    result = await parser.parse(source(1), DocumentParseOptions(mode=mode), document_id="docparse_degraded")
+    result = await parser.parse(source(1), ContentParseOptions(), document_id="docparse_degraded")
 
     assert [warning.code for warning in result.warnings] == ["glm_ocr_unavailable"]
     assert converter.page_ranges == [(1, 1)]

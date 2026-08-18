@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ask a running Docling GLM service to remove expired jobs."""
+"""Ask a running MosaicParse service to remove expired jobs."""
 
 from __future__ import annotations
 

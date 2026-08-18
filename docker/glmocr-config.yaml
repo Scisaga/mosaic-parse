@@ -1,0 +1,101 @@
+server:
+  host: 0.0.0.0
+  port: 5002
+  debug: false
+
+logging:
+  level: INFO
+
+pipeline:
+  maas:
+    enabled: false
+
+  ocr_api:
+    api_url: http://glm-ocr:8000/v1/chat/completions
+    model: zai-org/GLM-OCR
+    verify_ssl: false
+    connect_timeout: 30
+    request_timeout: 120
+    retry_max_attempts: 1
+    connection_pool_size: 4
+
+  # A single SDK page already fans out into multiple GLM-OCR regions. Start
+  # conservatively so the existing vLLM process remains the only GPU owner.
+  max_workers: 1
+  page_maxsize: 4
+  region_maxsize: 128
+
+  page_loader:
+    max_tokens: 8192
+    temperature: 0.0
+    top_p: 0.00001
+    top_k: 1
+    repetition_penalty: 1.1
+    image_format: JPEG
+    min_pixels: 12544
+    max_pixels: 71372800
+    task_prompt_mapping:
+      text: "Text Recognition:"
+      table: "Table Recognition:"
+      formula: "Formula Recognition:"
+    pdf_dpi: 200
+
+  result_formatter:
+    output_format: both
+    enable_merge_formula_numbers: true
+    enable_merge_text_blocks: true
+    enable_format_bullet_points: true
+    label_visualization_mapping:
+      table: [table]
+      formula: [display_formula, inline_formula]
+      image: [chart, image, footer_image, header_image, seal]
+      text:
+        - abstract
+        - algorithm
+        - aside_text
+        - content
+        - doc_title
+        - figure_title
+        - footer
+        - footnote
+        - formula_number
+        - header
+        - number
+        - paragraph_title
+        - reference
+        - reference_content
+        - text
+        - vertical_text
+        - vision_footnote
+
+  layout:
+    model_dir: PaddlePaddle/PP-DocLayoutV3_safetensors
+    threshold: 0.3
+    batch_size: 1
+    workers: 1
+    device: cpu
+    layout_nms: true
+    use_polygon: false
+    label_task_mapping:
+      text:
+        - abstract
+        - algorithm
+        - aside_text
+        - content
+        - doc_title
+        - figure_title
+        - footer
+        - footnote
+        - formula_number
+        - header
+        - number
+        - paragraph_title
+        - reference
+        - reference_content
+        - seal
+        - text
+        - vertical_text
+        - vision_footnote
+      table: [table]
+      formula: [display_formula, inline_formula]
+      skip: [chart, image, footer_image, header_image, seal]

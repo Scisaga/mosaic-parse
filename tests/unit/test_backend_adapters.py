@@ -1,3 +1,4 @@
+import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,11 +8,16 @@ import pytest
 from docling.datamodel.accelerator_options import AcceleratorOptions
 from docling.datamodel.pipeline_options import OcrMode
 from PIL import Image
+from pydantic import BaseModel
 
-from app.models import BackendState, DocumentParseOptions, ParseMode, StoredSource
-from app.parsers.base import ParserError
+from app.models import BackendState
 from app.parsers.glm_ocr_remote import GlmOcrRemoteAdapter, _install_plugin_compatibility
-from app.parsers.ollama_vlm import OllamaVlmParser
+from app.parsers.ollama_vlm import (
+    OllamaVisualAdapter,
+    VlmEmptyContentError,
+    VlmResponseTruncatedError,
+    VlmSchemaError,
+)
 
 
 def async_client(handler) -> httpx.AsyncClient:
@@ -120,7 +126,12 @@ def test_glm_plugin_sends_image_before_fixed_prompt() -> None:
     assert captured["max_tokens"] == 4096
 
 
-async def test_ollama_vlm_parses_an_image_through_openai_contract() -> None:
+class _VisualAnswer(BaseModel):
+    title: str
+    value: str
+
+
+async def test_ollama_vlm_structured_multi_image_contract() -> None:
     calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -128,15 +139,31 @@ async def test_ollama_vlm_parses_an_image_through_openai_contract() -> None:
         if request.url.path == "/v1/models":
             return httpx.Response(200, json={"data": [{"id": "vision-test"}]})
         assert request.url.path == "/v1/chat/completions"
-        payload = request.read().decode()
-        assert "data:image/png;base64," in payload
+        payload = json.loads(request.read())
+        images = [item for item in payload["messages"][0]["content"] if item["type"] == "image_url"]
+        assert len(images) == 2
+        assert all(item["image_url"]["url"].startswith("data:image/png;base64,") for item in images)
+        assert payload["reasoning_effort"] == "low"
+        assert payload["max_tokens"] == 16_384
+        assert payload["response_format"]["type"] == "json_schema"
         return httpx.Response(
             200,
-            json={"choices": [{"message": {"content": "# OCR result\n\nValue: 12,345.67"}}]},
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "content": '{"title":"资产负债表","value":"12,345.67"}',
+                            "reasoning": "private chain of thought",
+                        },
+                    }
+                ],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 50},
+            },
         )
 
     client = async_client(handler)
-    parser = OllamaVlmParser(
+    parser = OllamaVisualAdapter(
         SimpleNamespace(
             vlm_enabled=True,
             vlm_base_url="http://ollama.test/v1",
@@ -149,62 +176,62 @@ async def test_ollama_vlm_parses_an_image_through_openai_contract() -> None:
         client,
     )
     image_path = Path("tests/fixtures/sample-image.png").resolve()
-    result = await parser.parse(
-        StoredSource(
-            path=image_path,
-            filename=image_path.name,
-            mime_type="image/png",
-            size_bytes=image_path.stat().st_size,
-            page_count=1,
-        ),
-        DocumentParseOptions(mode=ParseMode.VLM),
-        document_id="docparse_vlmtest",
+    image = image_path.read_bytes()
+    completion = await parser.complete_structured(
+        [image, image],
+        "Read visible values",
+        _VisualAnswer,
+        max_tokens=16_384,
+        reasoning_effort="low",
     )
-    assert result.pages[0].content == "# OCR result\n\nValue: 12,345.67"
-    assert result.route_summary.vlm_pages == 1
-    assert result.route_summary.ocr_regions is None
-    assert calls == ["/v1/models", "/v1/chat/completions"]
+    assert completion.value.value == "12,345.67"
+    assert completion.finish_reason == "stop"
+    assert completion.reasoning_characters == len("private chain of thought")
+    assert calls == ["/v1/chat/completions"]
     await client.aclose()
 
 
-def test_mermaid_validation_requires_topology_and_rejects_active_content() -> None:
-    valid = "```mermaid\nflowchart TD\n  n1[检查] -->|Y| n2[装配]\n```"
-    assert OllamaVlmParser.validate_mermaid(valid) == valid
+@pytest.mark.parametrize(
+    ("response", "error_type"),
+    [
+        (
+            {"choices": [{"finish_reason": "length", "message": {"content": ""}}]},
+            VlmResponseTruncatedError,
+        ),
+        (
+            {"choices": [{"finish_reason": "stop", "message": {"content": ""}}]},
+            VlmEmptyContentError,
+        ),
+        (
+            {"choices": [{"finish_reason": "stop", "message": {"content": '{"title":1}'}}]},
+            VlmSchemaError,
+        ),
+    ],
+)
+async def test_ollama_vlm_models_protocol_failures(response, error_type) -> None:
+    client = async_client(lambda _request: httpx.Response(200, json=response))
+    parser = OllamaVisualAdapter(
+        SimpleNamespace(
+            vlm_enabled=True,
+            vlm_base_url="http://ollama.test/v1",
+            vlm_model="vision-test",
+            vlm_max_retries=0,
+        ),
+        client,
+    )
 
-    with pytest.raises(ParserError, match="no relationship edges"):
-        OllamaVlmParser.validate_mermaid("```mermaid\nflowchart TD\n  n1[只有节点]\n```")
-    with pytest.raises(ParserError, match="unsafe"):
-        OllamaVlmParser.validate_mermaid(
-            "```mermaid\nflowchart TD\n  n1[检查] --> n2[装配]\n  click n2 https://evil.test\n```"
+    with pytest.raises(error_type):
+        await parser.complete_structured(
+            [_png_bytes()],
+            "Read",
+            _VisualAnswer,
+            max_tokens=100,
+            reasoning_effort="low",
         )
-    with pytest.raises(ParserError, match="strict Mermaid"):
-        OllamaVlmParser.validate_mermaid("flowchart TD\nn1 --> n2")
+    await client.aclose()
 
 
-def test_mermaid_validation_accepts_all_declared_nodes_when_connected() -> None:
-    mermaid = (
-        "```mermaid\n"
-        "flowchart TD\n"
-        "  n1[准备零件]\n"
-        "  n2{零件检验}\n"
-        "  n3[再制造组件]\n"
-        "  n1 --> n2\n"
-        "  n2 -->|Y| n3\n"
-        "  n2 -->|N| n1\n"
-        "```"
-    )
-
-    assert OllamaVlmParser.validate_mermaid(mermaid) == mermaid
-
-
-def test_mermaid_validation_rejects_declared_isolated_stage_annotation() -> None:
-    mermaid = (
-        "```mermaid\n"
-        "flowchart TD\n"
-        "  n1[准备零件] --> n2{零件检验}\n"
-        "  n3[组件装配]\n"
-        "```"
-    )
-
-    with pytest.raises(ParserError, match=r"isolated node\(s\): n3"):
-        OllamaVlmParser.validate_mermaid(mermaid)
+def _png_bytes() -> bytes:
+    output = io.BytesIO()
+    Image.new("RGB", (4, 4), "white").save(output, format="PNG")
+    return output.getvalue()

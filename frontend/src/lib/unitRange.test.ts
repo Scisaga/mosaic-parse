@@ -1,4 +1,4 @@
-import { rangeIncludes, validatePageRange } from './pageRange'
+import { rangeIncludes, validatePageRange } from './unitRange'
 
 describe('validatePageRange', () => {
   it('accepts empty and disjoint page ranges', () => {

@@ -14,7 +14,7 @@ def settings(tmp_path: Path, **overrides: object) -> SimpleNamespace:
     values: dict[str, object] = {
         "data_dir": tmp_path,
         "max_upload_bytes": 1_000_000,
-        "max_document_pages": 10,
+        "max_content_units": 10,
         "allow_source_urls": True,
         "allow_private_source_urls": False,
         "source_url_max_redirects": 2,

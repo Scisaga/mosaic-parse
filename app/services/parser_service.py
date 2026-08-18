@@ -3,43 +3,70 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
-import json
+import logging
 import re
 import time
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from app.models.backend import BackendStatus
 from app.models.error import ServiceError
-from app.models.parse_options import DocumentParseOptions, ParseMode
+from app.models.parse_options import ContentParseOptions, VlmPolicy
 from app.models.parse_result import (
     DocumentParseResult,
+    PageDiagnostics,
     PageParseResult,
+    PageSourceKind,
     PageStatus,
     ParseWarning,
+    SelectionStrategy,
     WarningSeverity,
 )
 from app.models.source import StoredSource
 from app.parsers import (
     DoclingStandardParser,
+    DocumentParser,
     GlmOcrRemoteAdapter,
-    OllamaVlmParser,
+    GlmSdkRemoteParser,
+    OllamaVisualAdapter,
     ParserCancelledError,
     ParserError,
-    ParserRegistry,
     ParserUnavailableError,
     ProgressCallback,
 )
-from app.parsers.docling_standard import PictureCandidate
-from app.security.file_validation import FileValidationError, validate_stored_file
+from app.security.file_validation import (
+    DOCX_MIME,
+    IMAGE_MIME_TYPES,
+    PPTX_MIME,
+    VIDEO_MIME_TYPES,
+    FileValidationError,
+    validate_stored_file,
+)
+from app.services.evidence_service import (
+    NativeBlock,
+    PageEvidence,
+    PageEvidenceService,
+    compact_text,
+    date_tokens,
+    multiset_coverage,
+    number_tokens,
+    reading_order_inverted,
+    safe_cjk_compatibility_map,
+)
 from app.services.export_service import ExportService
+from app.services.ir_service import DocumentIRService
+from app.services.multimodal_service import MultimodalService
 from app.services.quality_service import QualityService
-from app.utils.ids import new_document_id
+from app.services.storage_service import StorageService
+from app.services.visual_fusion_service import VisualFusionService
+from app.utils.ids import new_content_id
 from app.utils.page_range import PageRangeError, format_page_range, parse_page_range
 from app.utils.settings import setting
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -59,8 +86,6 @@ class _NativePageEvidence:
 
 
 class ParserService:
-    _DIAGRAM_HINT = re.compile(r"流程图|工作流|框图|flow\s*chart|workflow|diagram", re.IGNORECASE)
-    _IMAGE_PLACEHOLDER = "<!-- image -->"
     _CJK = r"\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
     _CJK_SPACE = re.compile(rf"(?<=[{_CJK}])[ \t]+(?=[{_CJK}])")
     _SPACE_BEFORE_CJK_PUNCT = re.compile(r"[ \t]+(?=[，。！？；：、）》】」』])")
@@ -94,14 +119,14 @@ class ParserService:
     def __init__(
         self,
         settings: object | None,
-        registry: ParserRegistry | None = None,
         quality_service: QualityService | None = None,
         export_service: ExportService | None = None,
     ) -> None:
         self.settings = settings
-        self.registry = registry or ParserRegistry()
         self.quality_service = quality_service or QualityService(settings)
         self.export_service = export_service or ExportService()
+        self.evidence_service = PageEvidenceService(settings)
+        self.ir_service = DocumentIRService(settings)
         self._semaphore = asyncio.Semaphore(int(setting(settings, "parser_workers", 1)))
         self._lifecycle_condition = asyncio.Condition()
         self._reloading = False
@@ -111,19 +136,20 @@ class ParserService:
 
     def _build_adapters(self) -> None:
         self.glm_adapter = GlmOcrRemoteAdapter(self.settings)
+        self.glm_sdk_parser = GlmSdkRemoteParser(self.settings)
         self.standard_parser = DoclingStandardParser(self.settings, self.glm_adapter)
-        self.vlm_parser = OllamaVlmParser(self.settings)
-        self.registry.clear()
-        self.registry.register(ParseMode.AUTO, self.standard_parser)
-        self.registry.register(ParseMode.STANDARD, self.standard_parser)
-        self.registry.register(ParseMode.OCR, self.standard_parser)
-        self.registry.register(ParseMode.VLM, self.vlm_parser)
+        self.vlm_parser = OllamaVisualAdapter(self.settings)
+        self.visual_fusion_service = VisualFusionService(self.settings, self.vlm_parser)
+        self.multimodal_service = MultimodalService(
+            self.settings, StorageService(self.settings), self.vlm_parser
+        )
 
     async def initialize(self) -> None:
         if self._initialized:
             return
         await asyncio.gather(
             self.standard_parser.initialize(),
+            self.glm_sdk_parser.initialize(),
             self.vlm_parser.initialize(),
         )
         # A missing optional backend must not prevent CPU/native-text startup.
@@ -133,7 +159,6 @@ class ParserService:
         await self._begin_exclusive_lifecycle()
         try:
             await self._close_adapters()
-            self.registry = ParserRegistry()
             self._build_adapters()
             await self.initialize()
         finally:
@@ -150,6 +175,7 @@ class ParserService:
         await asyncio.gather(
             self.standard_parser.close(),
             self.glm_adapter.close(),
+            self.glm_sdk_parser.close(),
             self.vlm_parser.close(),
             return_exceptions=True,
         )
@@ -190,12 +216,13 @@ class ParserService:
     async def probe_backends(self) -> list[BackendStatus]:
         if not self._initialized:
             await self.initialize()
-        docling, glm, vlm = await asyncio.gather(
+        docling, glm, glm_sdk, vlm = await asyncio.gather(
             self.standard_parser.probe(),
             self.glm_adapter.probe(),
+            self.glm_sdk_parser.probe(),
             self.vlm_parser.probe(),
         )
-        return [docling, glm, vlm]
+        return [docling, glm, glm_sdk, vlm]
 
     def _coerce_source(self, source: StoredSource | str | Path) -> StoredSource:
         if isinstance(source, StoredSource):
@@ -206,7 +233,11 @@ class ParserService:
                 path,
                 path.name,
                 max_bytes=int(setting(self.settings, "max_upload_bytes", 200 * 1024 * 1024)),
-                max_pages=int(setting(self.settings, "max_document_pages", 1_000)),
+                max_pages=int(setting(self.settings, "max_content_units", 1_000)),
+                max_video_seconds=int(setting(self.settings, "max_video_seconds", 30 * 60)),
+                max_video_frame_pixels=int(
+                    setting(self.settings, "video_max_frame_pixels", 7680 * 4320)
+                ),
             )
         except FileValidationError as exc:
             raise ServiceError(exc.code, str(exc), status_code=415) from exc
@@ -218,14 +249,508 @@ class ParserService:
             page_count=page_count,
         )
 
-    def _finalize_exports(self, result: DocumentParseResult, options: DocumentParseOptions) -> None:
-        markdown, plain_text = self.export_service.join_pages(
+    def _finalize_exports(self, result: DocumentParseResult, options: ContentParseOptions) -> None:
+        for page in result.pages:
+            page.plain_text = self.export_service.markdown_to_text(page.content or "")
+        markdown, plain_text = self.export_service.join_document(
             result.pages,
-            preserve_page_breaks=options.preserve_page_breaks,
+            preserve_page_breaks=True,
+            table_fragments=result._table_fragments,
+            merge_cross_page_tables=bool(
+                setting(self.settings, "cross_page_table_merge_enabled", True)
+            ),
         )
         result.markdown = markdown
         result.plain_text = plain_text
         result.processed_pages = sum(page.status.value != "failed" for page in result.pages)
+
+    async def _page_evidence(
+        self,
+        source: StoredSource,
+        result: DocumentParseResult,
+    ) -> dict[int, PageEvidence]:
+        pages = {page.page_number for page in result.pages}
+        evidence = await asyncio.to_thread(self.evidence_service.inspect, source, pages)
+        for page in result.pages:
+            item = evidence.get(page.page_number)
+            if item is None:
+                continue
+            page.diagnostics = PageDiagnostics(
+                source_kind=item.source_kind,
+                native_text_characters=item.native_text_characters,
+                visual_ink_ratio=item.visual_ink_ratio,
+                image_coverage_ratio=item.image_coverage_ratio,
+                detected_rotation_degrees=item.detected_rotation_degrees,  # type: ignore[arg-type]
+            )
+        return evidence
+
+    @staticmethod
+    def _replace_evidence_glyphs(page: PageParseResult, evidence: PageEvidence) -> bool:
+        content = page.content or ""
+        replacements = dict(evidence.glyph_mappings)
+        replacements.update(safe_cjk_compatibility_map(content, evidence.native_text))
+        compact_native = compact_text(evidence.native_body_text)
+        compact_content = compact_text(content)
+        matcher = SequenceMatcher(None, compact_content, compact_native, autojunk=False)
+        for operation, left_start, left_end, right_start, right_end in matcher.get_opcodes():
+            if operation != "replace" or left_end - left_start != 1 or right_end - right_start != 1:
+                continue
+            source_character = compact_content[left_start:left_end]
+            target_character = compact_native[right_start:right_end]
+            if source_character and unicodedata.category(source_character) == "Co":
+                replacements[source_character] = target_character
+        changed = False
+        for source_character, target_character in replacements.items():
+            if source_character in content:
+                content = content.replace(source_character, target_character)
+                changed = True
+        if changed:
+            page.content = content
+            page.plain_text = None
+        return changed
+
+    @staticmethod
+    def _looks_like_table(content: str) -> bool:
+        return (
+            sum(
+                line.strip().startswith("|") and line.count("|") >= 2
+                for line in content.splitlines()
+            )
+            >= 2
+        )
+
+    @staticmethod
+    def _refresh_table_fragment_renderings(result: DocumentParseResult) -> None:
+        """Keep fragment byte references aligned after deterministic text normalization."""
+
+        pages = {page.page_number: page for page in result.pages}
+        for fragment in result._table_fragments:
+            page_number = getattr(fragment, "page_number", None)
+            if not isinstance(page_number, int):
+                continue
+            page = pages.get(page_number)
+            fragment_id = str(getattr(fragment, "fragment_id", "") or "")
+            content = page.content if page is not None else None
+            if not content or not fragment_id:
+                continue
+            marker = f"<!-- table-fragment: {fragment_id} -->"
+            pattern = re.compile(
+                rf"{re.escape(marker)}\n\n(?P<table>(?:\|[^\n]*(?:\n|$))+)",
+            )
+            match = pattern.search(content)
+            if match is None:
+                continue
+            markdown = match.group("table").rstrip()
+            fragment.markdown = markdown  # type: ignore[attr-defined]
+            fragment.rendered = f"{marker}\n\n{markdown}"  # type: ignore[attr-defined]
+
+    @staticmethod
+    def _native_blocks_outside_tables(
+        evidence: PageEvidence,
+        fragments: list[object],
+    ) -> tuple[list[NativeBlock], list[tuple[float, float, float, float]]]:
+        table_regions: list[tuple[float, float, float, float]] = []
+        if evidence.page_width <= 0 or evidence.page_height <= 0:
+            return list(evidence.native_blocks), table_regions
+        for fragment in fragments:
+            normalized = getattr(fragment, "normalized_bbox", None)
+            if not normalized:
+                continue
+            left, top, right, bottom = normalized
+            table_regions.append(
+                (
+                    left * evidence.page_width,
+                    top * evidence.page_height,
+                    right * evidence.page_width,
+                    bottom * evidence.page_height,
+                )
+            )
+
+        def overlaps_table(block: NativeBlock) -> bool:
+            block_area = max(
+                1.0,
+                (block.bbox[2] - block.bbox[0]) * (block.bbox[3] - block.bbox[1]),
+            )
+            for region in table_regions:
+                intersection = max(
+                    0.0,
+                    min(block.bbox[2], region[2]) - max(block.bbox[0], region[0]),
+                ) * max(
+                    0.0,
+                    min(block.bbox[3], region[3]) - max(block.bbox[1], region[1]),
+                )
+                if intersection / block_area >= 0.25:
+                    return True
+            return False
+
+        return (
+            [block for block in evidence.native_blocks if not overlaps_table(block)],
+            table_regions,
+        )
+
+    @classmethod
+    def _native_repair_candidate(
+        cls,
+        content: str,
+        evidence: PageEvidence,
+        fragments: list[object],
+    ) -> str:
+        """Reorder existing Markdown nodes using native geometry without inventing text."""
+
+        body_blocks, _table_regions = cls._native_blocks_outside_tables(evidence, fragments)
+        if not body_blocks:
+            return ""
+        working = content
+        table_nodes: dict[str, tuple[str, NativeBlock]] = {}
+        for index, fragment in enumerate(fragments):
+            normalized = getattr(fragment, "normalized_bbox", None)
+            rendered = str(getattr(fragment, "rendered", "") or "")
+            if (
+                not normalized
+                or not rendered
+                or evidence.page_width <= 0
+                or evidence.page_height <= 0
+                or rendered not in working
+            ):
+                return ""
+            left, top, right, bottom = normalized
+            marker = f"\x00table-{index}\x00"
+            block = NativeBlock(
+                text=marker,
+                bbox=(
+                    left * evidence.page_width,
+                    top * evidence.page_height,
+                    right * evidence.page_width,
+                    bottom * evidence.page_height,
+                ),
+                max_font_size=0,
+                bold=False,
+            )
+            table_nodes[marker] = (rendered, block)
+            working = working.replace(rendered, marker, 1)
+
+        rendered_nodes: dict[str, str] = {
+            marker: rendered for marker, (rendered, _block) in table_nodes.items()
+        }
+        layout_blocks = [block for _rendered, block in table_nodes.values()]
+        body_order = {id(block): index for index, block in enumerate(body_blocks)}
+        claimed_blocks: set[int] = set()
+        text_index = 0
+
+        def normalized_block_text(block: NativeBlock) -> str:
+            value = block.text
+            for source_character, target_character in evidence.glyph_mappings.items():
+                value = value.replace(source_character, target_character)
+            return compact_text(value)
+
+        for part in re.split(r"\n\s*\n", working):
+            stripped = part.strip()
+            if not stripped:
+                continue
+            if stripped in table_nodes:
+                continue
+            node_text = compact_text(stripped)
+            if not node_text:
+                return ""
+            matches = [
+                block
+                for block in body_blocks
+                if (block_text := normalized_block_text(block))
+                and len(block_text) >= 4
+                and (block_text in node_text or node_text in block_text)
+                and id(block) not in claimed_blocks
+            ]
+            if not matches:
+                return ""
+            matches.sort(key=lambda block: body_order[id(block)])
+            normalized_matches = {normalized_block_text(block) for block in matches}
+            if len(matches) > 1 and len(normalized_matches) == 1:
+                matches = matches[:1]
+            matched_text = "".join(block.text for block in matches)
+            for source_character, target_character in evidence.glyph_mappings.items():
+                matched_text = matched_text.replace(source_character, target_character)
+            if (
+                multiset_coverage(stripped, matched_text) < 0.98
+                or multiset_coverage(matched_text, stripped) < 0.98
+            ):
+                return ""
+            claimed_blocks.update(id(block) for block in matches)
+            marker = f"\x00text-{text_index}\x00"
+            text_index += 1
+            rendered_nodes[marker] = stripped
+            layout_blocks.append(
+                NativeBlock(
+                    text=marker,
+                    bbox=(
+                        min(block.bbox[0] for block in matches),
+                        min(block.bbox[1] for block in matches),
+                        max(block.bbox[2] for block in matches),
+                        max(block.bbox[3] for block in matches),
+                    ),
+                    max_font_size=max(block.max_font_size for block in matches),
+                    bold=any(block.bold for block in matches),
+                )
+            )
+
+        layout = PageEvidence(
+            page_number=evidence.page_number,
+            source_kind=evidence.source_kind,
+            native_blocks=layout_blocks,
+            page_width=evidence.page_width,
+            page_height=evidence.page_height,
+        )._blocks_in_reading_order()
+        if len(layout) != len(rendered_nodes):
+            return ""
+        return "\n\n".join(rendered_nodes[block.text] for block in layout).strip()
+
+    @staticmethod
+    def _repair_split_headings(
+        result: DocumentParseResult,
+        evidence_by_page: dict[int, PageEvidence],
+    ) -> None:
+        pattern = re.compile(
+            r"(?m)^(?P<level>#{1,6})[ \t]+(?P<left>[^\n]+)\n[ \t]*\n"
+            r"(?P=level)[ \t]*(?P<right>[^\n]+)$"
+        )
+        repaired_pages: list[int] = []
+        for page in result.pages:
+            evidence = evidence_by_page.get(page.page_number)
+            content = page.content or ""
+            if evidence is None or evidence.source_kind != PageSourceKind.NATIVE:
+                continue
+            native_lines = Counter(compact_text(line) for line in evidence.native_lines)
+            changed = False
+
+            def merge(
+                match: re.Match[str],
+                native_line_counts: Counter[str] = native_lines,
+            ) -> str:
+                nonlocal changed
+                left = match.group("left").rstrip()
+                right = match.group("right").lstrip()
+                if len(compact_text(left)) > 4 and not right.startswith(tuple("、，。：；）】》")):
+                    return match.group(0)
+                combined = f"{left}{right}"
+                if native_line_counts[compact_text(combined)] != 1:
+                    return match.group(0)
+                changed = True
+                return f"{match.group('level')} {combined}"
+
+            repaired = pattern.sub(merge, content)
+            if not changed:
+                continue
+            page.content = repaired
+            page.plain_text = None
+            if page.diagnostics is not None:
+                page.diagnostics.selected_strategy = SelectionStrategy.NATIVE_REPAIR
+            repaired_pages.append(page.page_number)
+        if repaired_pages:
+            result.warnings.append(
+                ParseWarning(
+                    code="split_heading_repaired",
+                    message=f"native line evidence rejoined split headings on {len(repaired_pages)} page(s)",
+                    severity=WarningSeverity.INFO,
+                    backend="pymupdf-native",
+                    details={"pages": repaired_pages},
+                )
+            )
+
+    @classmethod
+    def _remove_unanchored_table_numbers(
+        cls,
+        result: DocumentParseResult,
+        evidence_by_page: dict[int, PageEvidence],
+    ) -> None:
+        standalone = re.compile(r"^[ \t]*(?P<value>[-−]?\(?\d[\d,]*\.\d+%?\)?)[ \t]*$")
+        repaired_pages: list[int] = []
+        for page in result.pages:
+            evidence = evidence_by_page.get(page.page_number)
+            fragments = [
+                fragment
+                for fragment in result._table_fragments
+                if getattr(fragment, "page_number", None) == page.page_number
+            ]
+            if evidence is None or not fragments:
+                continue
+            _body_blocks, regions = cls._native_blocks_outside_tables(evidence, fragments)
+            table_numbers = Counter(
+                number
+                for fragment in fragments
+                for number in number_tokens(str(getattr(fragment, "markdown", "") or ""))
+            )
+
+            def positioned_in_table(
+                value: str,
+                native_blocks: list[NativeBlock] = evidence.native_blocks,
+                table_regions: list[tuple[float, float, float, float]] = regions,
+            ) -> bool:
+                for block in native_blocks:
+                    if value not in number_tokens(block.text):
+                        continue
+                    center_x = (block.bbox[0] + block.bbox[2]) / 2
+                    center_y = (block.bbox[1] + block.bbox[3]) / 2
+                    if any(
+                        left <= center_x <= right and top <= center_y <= bottom
+                        for left, top, right, bottom in table_regions
+                    ):
+                        return True
+                return False
+
+            removed = 0
+            retained_lines: list[str] = []
+            for line in (page.content or "").splitlines():
+                match = standalone.fullmatch(line)
+                values = number_tokens(match.group("value")) if match else []
+                value = values[0] if len(values) == 1 else ""
+                if value and table_numbers[value] and positioned_in_table(value):
+                    removed += 1
+                    continue
+                retained_lines.append(line)
+            if not removed:
+                continue
+            page.content = re.sub(r"\n{3,}", "\n\n", "\n".join(retained_lines)).strip()
+            page.plain_text = None
+            if page.diagnostics is not None:
+                page.diagnostics.selected_strategy = SelectionStrategy.NATIVE_REPAIR
+            repaired_pages.append(page.page_number)
+        if repaired_pages:
+            result.warnings.append(
+                ParseWarning(
+                    code="unanchored_table_numbers_removed",
+                    message=f"position and table evidence removed duplicated standalone numbers on {len(repaired_pages)} page(s)",
+                    severity=WarningSeverity.INFO,
+                    backend="pymupdf-native",
+                    details={"pages": repaired_pages},
+                )
+            )
+
+    def _repair_native_reading_order(
+        self,
+        result: DocumentParseResult,
+        evidence_by_page: dict[int, PageEvidence],
+    ) -> None:
+        repair_enabled = bool(setting(self.settings, "native_text_repair_enabled", True))
+        minimum_anchors = int(setting(self.settings, "quality_reading_order_min_anchors", 4))
+        minimum_coverage = float(setting(self.settings, "quality_native_repair_min_coverage", 0.98))
+        minimum_ratio = float(
+            setting(self.settings, "quality_native_repair_min_length_ratio", 0.95)
+        )
+        maximum_ratio = float(
+            setting(self.settings, "quality_native_repair_max_length_ratio", 1.05)
+        )
+        repaired_pages: list[int] = []
+        for page in result.pages:
+            evidence = evidence_by_page.get(page.page_number)
+            content = page.content or ""
+            page_fragments = [
+                fragment
+                for fragment in result._table_fragments
+                if getattr(fragment, "page_number", None) == page.page_number
+            ]
+            body_blocks, _table_regions = (
+                self._native_blocks_outside_tables(evidence, page_fragments)
+                if evidence is not None
+                else ([], [])
+            )
+            if (
+                evidence is None
+                or evidence.source_kind != PageSourceKind.NATIVE
+                or not reading_order_inverted(
+                    evidence,
+                    content,
+                    minimum_anchors,
+                    blocks=body_blocks,
+                )
+            ):
+                continue
+            if not repair_enabled:
+                page.warnings.append(
+                    ParseWarning(
+                        code="reading_order_inversion",
+                        message="native visual-order anchors occur out of order in parsed output",
+                        page_number=page.page_number,
+                        backend=page.backend,
+                        details={"repair_disabled": True},
+                    )
+                )
+                continue
+            candidate = self._native_repair_candidate(content, evidence, page_fragments)
+            reference_length = max(1, len(compact_text(content)))
+            candidate_ratio = len(compact_text(candidate)) / reference_length
+            rejection_codes: list[str] = []
+            if (
+                multiset_coverage(candidate, content) < minimum_coverage
+                or multiset_coverage(content, candidate) < minimum_coverage
+            ):
+                rejection_codes.append("character_coverage")
+            if not minimum_ratio <= candidate_ratio <= maximum_ratio:
+                rejection_codes.append("length_ratio")
+            if Counter(number_tokens(candidate)) != Counter(number_tokens(content)):
+                rejection_codes.append("numeric_mismatch")
+            if date_tokens(candidate) != date_tokens(content):
+                rejection_codes.append("date_mismatch")
+            if Counter(compact_text(candidate)) != Counter(compact_text(content)):
+                rejection_codes.append("non_unique_block_match")
+            diagnostics = page.diagnostics
+            if rejection_codes:
+                page.warnings.append(
+                    ParseWarning(
+                        code="reading_order_inversion",
+                        message="native visual-order anchors occur out of order in parsed output",
+                        page_number=page.page_number,
+                        backend=page.backend,
+                        details={"repair_rejected": rejection_codes},
+                    )
+                )
+                continue
+            page.content = candidate
+            page.plain_text = None
+            if diagnostics is not None:
+                diagnostics.selected_strategy = SelectionStrategy.NATIVE_REPAIR
+            repaired_pages.append(page.page_number)
+        if repaired_pages:
+            result.warnings.append(
+                ParseWarning(
+                    code="native_reading_order_repaired",
+                    message=f"native PDF geometry repaired reading order on {len(repaired_pages)} page(s)",
+                    severity=WarningSeverity.INFO,
+                    backend="pymupdf-native",
+                    details={"pages": repaired_pages},
+                )
+            )
+
+    @staticmethod
+    def _normalize_directory_pages(
+        result: DocumentParseResult,
+        evidence_by_page: dict[int, PageEvidence],
+    ) -> None:
+        entry = re.compile(r"^(?P<title>.+?)[.·…]{4,}\s*(?P<page>\d+)\s*$")
+        normalized_pages: set[int] = set()
+        for page in result.pages:
+            evidence = evidence_by_page.get(page.page_number)
+            if evidence is None or not any(
+                line.strip() == "目录" for line in evidence.native_lines
+            ):
+                continue
+            entries = [
+                match for line in evidence.native_lines if (match := entry.match(line.strip()))
+            ]
+            if len(entries) < 3:
+                continue
+            page.content = "# 目录\n\n" + "\n".join(
+                f"- {match.group('title').rstrip('.·… ')} …… {match.group('page')}"
+                for match in entries
+            )
+            page.plain_text = None
+            if page.diagnostics is not None:
+                page.diagnostics.selected_strategy = SelectionStrategy.NATIVE_REPAIR
+            normalized_pages.add(page.page_number)
+        if normalized_pages:
+            result._table_fragments = [
+                fragment
+                for fragment in result._table_fragments
+                if getattr(fragment, "page_number", None) not in normalized_pages
+            ]
 
     @classmethod
     def _native_lexicons(
@@ -252,9 +777,12 @@ class ParserService:
                     native_page = document.load_page(page_number - 1)
                     for item in native_page.get_text("words"):
                         token = str(item[4])
-                        evidence.words.update(match.group().casefold() for match in cls._NATIVE_WORD.finditer(token))
+                        evidence.words.update(
+                            match.group().casefold() for match in cls._NATIVE_WORD.finditer(token)
+                        )
                         evidence.compounds.update(
-                            match.group().casefold() for match in cls._NATIVE_COMPOUND.finditer(token)
+                            match.group().casefold()
+                            for match in cls._NATIVE_COMPOUND.finditer(token)
                         )
                     native_text = str(native_page.get_text("text"))
                     for match in cls._CJK_SPACE.finditer(native_text):
@@ -265,8 +793,12 @@ class ParserService:
                         identifier = match.group("identifier")
                         if len(identifier) < 6:
                             continue
-                        prefix = "".join(cls._CONTEXT_CHARACTER.findall(native_text[: match.start()]))[-6:]
-                        suffix = "".join(cls._CONTEXT_CHARACTER.findall(native_text[match.end() :]))[:6]
+                        prefix = "".join(
+                            cls._CONTEXT_CHARACTER.findall(native_text[: match.start()])
+                        )[-6:]
+                        suffix = "".join(
+                            cls._CONTEXT_CHARACTER.findall(native_text[match.end() :])
+                        )[:6]
                         if len(prefix) >= 4 and len(suffix) >= 4:
                             evidence.underscore_identifiers.append(
                                 _NativeIdentifierEvidence(
@@ -310,11 +842,7 @@ class ParserService:
     def _suspicious_glyph_counts(text: str) -> dict[str, int]:
         counts: dict[str, int] = {}
         for character in text:
-            # U+F0B7 is the one confirmed Wingdings bullet mapping. It is
-            # reported as mapped only when sanitation actually touches it;
-            # protected code spans retain it verbatim and do not report it as
-            # an unknown private-use glyph.
-            if character in {"\n", "\t", "\uf0b7"}:
+            if character in {"\n", "\t"}:
                 continue
             if character == "\ufffd" or unicodedata.category(character) in {"Cc", "Cf", "Co", "Cs"}:
                 codepoint = f"U+{ord(character):04X}"
@@ -329,14 +857,8 @@ class ParserService:
             if character in {"\n", "\t"}:
                 output.append(character)
                 continue
-            if character == "\uf0b7":
-                counts["U+F0B7"] = counts.get("U+F0B7", 0) + 1
-                output.append("•")
-            else:
-                output.append(character)
+            output.append(character)
         cleaned = "".join(output)
-        # Docling already emits a Markdown list marker for Wingdings bullets.
-        cleaned = re.sub(r"(?m)^([ \t]*[-*+][ \t]+)•[ \t]*", r"\1", cleaned)
         return cleaned, counts
 
     @classmethod
@@ -350,14 +872,17 @@ class ParserService:
         text = cls._CJK_SPACE.sub(
             lambda match: (
                 " "
-                if match.string[match.start() - 1] + match.string[match.end()] in native_cjk_space_boundaries
+                if match.string[match.start() - 1] + match.string[match.end()]
+                in native_cjk_space_boundaries
                 else ""
             ),
             text,
         )
         text = cls._SPACE_BEFORE_CJK_PUNCT.sub("", text)
         text = cls._SPACE_AFTER_CJK_PUNCT.sub("", text)
-        text = cls._ALNUM_RUN.sub(lambda match: cls._merge_native_fragments(match, native_words), text)
+        text = cls._ALNUM_RUN.sub(
+            lambda match: cls._merge_native_fragments(match, native_words), text
+        )
         return cls._COMPOUND_RUN.sub(
             lambda match: cls._merge_native_compound(match, native_compounds),
             text,
@@ -520,7 +1045,7 @@ class ParserService:
                 if attribute == "content" or page.content is None:
                     for codepoint, count in glyphs.items():
                         sanitized[codepoint] = sanitized.get(codepoint, 0) + count
-                    suspicious = {codepoint: count for codepoint, count in glyphs.items() if codepoint != "U+F0B7"}
+                    suspicious = dict(glyphs)
                     if suspicious:
                         suspicious_glyph_pages.add(page.page_number)
                         suspicious_glyphs_by_page[page.page_number] = suspicious
@@ -531,7 +1056,9 @@ class ParserService:
                         - normalized.count(" ")
                         - normalized.count("\t"),
                     )
-                    visible_characters = max(1, sum(not character.isspace() for character in original))
+                    visible_characters = max(
+                        1, sum(not character.isspace() for character in original)
+                    )
                     removed_ratio = removed_spaces / visible_characters
                     if (
                         removed_spaces >= self._SEVERE_SPACING_MIN_REMOVED
@@ -550,7 +1077,10 @@ class ParserService:
                         message="page contains preserved Unicode replacement, control, format, private-use, or surrogate glyphs",
                         page_number=page.page_number,
                         backend=page.backend,
-                        details={"detected_codepoints": page_suspicious, "characters_preserved": True},
+                        details={
+                            "detected_codepoints": page_suspicious,
+                            "characters_preserved": True,
+                        },
                     )
                 )
         if changed_pages or suspicious_glyph_pages:
@@ -558,7 +1088,7 @@ class ParserService:
                 "pages": sorted(changed_pages),
                 "suspicious_glyph_pages": sorted(suspicious_glyph_pages),
                 "detected_codepoints": sanitized,
-                "mapped_codepoints": ({"U+F0B7": sanitized["U+F0B7"]} if "U+F0B7" in sanitized else {}),
+                "mapped_codepoints": {},
                 "native_token_guard": source.mime_type == "application/pdf",
             }
             if severely_polluted_pages:
@@ -604,11 +1134,15 @@ class ParserService:
                 return None
             normalized = cls._BROKEN_STANDARD_PREFIX.sub("GB/T", value)
             normalized = cls._BROKEN_APPENDIX_CONTEXT.sub(
-                lambda match: f"{match.group('prefix')}{cls._BROKEN_APPENDIX_LETTERS[match.group('glyph')]}",
+                lambda match: (
+                    f"{match.group('prefix')}{cls._BROKEN_APPENDIX_LETTERS[match.group('glyph')]}"
+                ),
                 normalized,
             )
             return cls._BROKEN_APPENDIX_HEADING.sub(
-                lambda match: f"{match.group('prefix')}{cls._BROKEN_APPENDIX_LETTERS[match.group('glyph')]}",
+                lambda match: (
+                    f"{match.group('prefix')}{cls._BROKEN_APPENDIX_LETTERS[match.group('glyph')]}"
+                ),
                 normalized,
             )
 
@@ -633,348 +1167,268 @@ class ParserService:
                 )
             )
 
-    @staticmethod
-    async def _notify_postprocess(
-        callback: ProgressCallback | None,
-        current: int,
-        total: int,
-        phase: str,
-    ) -> None:
-        if callback is None:
-            return
-        notification = callback(current, total, phase)
-        if inspect.isawaitable(notification):
-            await notification
+    def _complex_visual_targets(
+        self,
+        result: DocumentParseResult,
+        evidence_by_page: dict[int, PageEvidence],
+    ) -> dict[int, str]:
+        """Select only measured scanned/mixed tables and signature-heavy visual pages."""
 
-    @staticmethod
-    def _usable_replacements(
-        replacement: DocumentParseResult,
-        requested_pages: set[int],
-    ) -> dict[int, PageParseResult]:
-        return {
-            page.page_number: page
-            for page in replacement.pages
-            if page.page_number in requested_pages
-            and page.status != PageStatus.FAILED
-            and bool((page.content or "").strip())
-            and not QualityService.has_suspicious_unicode_mojibake(page.content)
+        if not bool(setting(self.settings, "visual_router_enabled", True)):
+            return {}
+        minimum_area = float(setting(self.settings, "quality_table_min_grid_area_ratio", 0.25))
+        table_failure_codes = {
+            "low_text_content",
+            "repeated_text",
+            "table_header_propagation",
+            "table_shape_explosion",
+            "table_structure_invalid",
+            "unanchored_table_numbers",
+            "visual_text_mismatch",
         }
+        signature_hint = re.compile(
+            r"注册会计师|法定代表人|主管会计工作负责人|会计机构负责人|签名|签字|盖章"
+        )
+        targets: dict[int, str] = {}
+        for page in result.pages:
+            evidence = evidence_by_page.get(page.page_number)
+            if evidence is None or evidence.source_kind not in {
+                PageSourceKind.SCANNED,
+                PageSourceKind.MIXED,
+            }:
+                continue
+            warning_codes = {
+                warning.code
+                for warning in page.warnings
+                if warning.severity != WarningSeverity.INFO
+            }
+            complex_grid = (
+                evidence.has_complex_grid
+                and evidence.grid_area_ratio >= minimum_area
+                and evidence.horizontal_grid_lines >= 3
+                and evidence.vertical_grid_lines >= 3
+            )
+            table_failure = bool(warning_codes & table_failure_codes) and bool(
+                evidence.grid_regions
+            )
+            if complex_grid or table_failure:
+                targets[page.page_number] = "table"
+                continue
+            content = page.content or ""
+            signature_page = bool(signature_hint.search(content)) and (
+                "<!-- image -->" in content
+                or (evidence.image_coverage_ratio or 0.0) >= 0.20
+                or "repeated_text" in warning_codes
+            )
+            if signature_page:
+                targets[page.page_number] = "signature"
+        return targets
 
-    async def _repair_auto_mojibake(
+    async def _apply_visual_fusion(
         self,
         result: DocumentParseResult,
         source: StoredSource,
-        options: DocumentParseOptions,
-        pages: list[int],
+        options: ContentParseOptions,
+        evidence_by_page: dict[int, PageEvidence],
+        eligible_pages: set[int] | None = None,
         *,
         document_id: str,
         cancel_event: object | None,
-        progress_callback: ProgressCallback | None,
     ) -> None:
-        """Repair only confidently detected broken-ToUnicode pages.
+        """Fuse GLM layout/OCR and regional Qwen reasoning without replacing whole pages."""
 
-        Full-page GLM OCR is preferred because it is a transcription backend;
-        whole-page VLM replacement remains governed by the existing explicit
-        fallback option.
-        """
-
-        unresolved = set(pages)
-        await self._notify_postprocess(
-            progress_callback,
-            result.processed_pages,
-            len(result.pages),
-            "postprocess.text_repair",
-        )
-        replacements: dict[int, PageParseResult] = {}
-        used_ocr: set[int] = set()
-        glm_status = await self.glm_adapter.probe()
-        if glm_status.ready:
-            ocr_options = options.model_copy(
-                update={
-                    "mode": ParseMode.OCR,
-                    "page_range": format_page_range(pages),
-                    "enable_vlm_fallback": False,
-                }
-            )
-            try:
-                repaired = await self.standard_parser.parse(
-                    source,
-                    ocr_options,
-                    document_id=document_id,
-                    cancel_event=cancel_event,
-                )
-                accepted = self._usable_replacements(repaired, unresolved)
-                replacements.update(accepted)
-                used_ocr.update(accepted)
-                unresolved.difference_update(accepted)
-            except (ParserCancelledError, asyncio.CancelledError):
-                raise
-            except ParserError:
-                # AUTO is fail-soft: a secondary correction route must never
-                # discard the usable primary Docling result.
-                pass
-
-        if replacements:
-            result.pages = [replacements.get(page.page_number, page) for page in result.pages]
-        if used_ocr:
-            result.route_summary.pages_with_ocr = len(used_ocr)
-            result.route_summary.ocr_regions = len(used_ocr)
-            result.warnings.append(
-                ParseWarning(
-                    code="auto_mojibake_repaired",
-                    message=f"full-page OCR repaired suspicious Unicode text on {len(used_ocr)} page(s)",
-                    severity=WarningSeverity.INFO,
-                    backend=self.glm_adapter.name,
-                    details={"pages": sorted(used_ocr), "strategy": "full_page_ocr"},
-                )
-            )
-        for page in result.pages:
-            if page.page_number not in unresolved:
-                continue
-            page.status = PageStatus.WARNING
-            if not any(warning.code == "suspicious_unicode_mojibake" for warning in page.warnings):
-                page.warnings.append(
-                    ParseWarning(
-                        code="suspicious_unicode_mojibake",
-                        message="page contains a likely broken PDF ToUnicode mapping after the OCR repair attempt",
-                        page_number=page.page_number,
-                        backend=page.backend,
-                    )
-                )
-
-    @classmethod
-    def _insert_after_picture_placeholder(cls, content: str, index: int, mermaid: str) -> str | None:
-        matches = list(re.finditer(re.escape(cls._IMAGE_PLACEHOLDER), content))
-        if not 0 <= index < len(matches):
-            return None
-        insertion = matches[index].end()
-        return f"{content[:insertion]}\n\n{mermaid}{content[insertion:]}"
-
-    async def _enrich_auto_diagrams(
-        self,
-        result: DocumentParseResult,
-        source: StoredSource,
-        options: DocumentParseOptions,
-        *,
-        cancel_event: object | None,
-        progress_callback: ProgressCallback | None,
-    ) -> None:
-        if not bool(setting(self.settings, "vlm_diagram_enrichment_enabled", True)):
+        targets = self._complex_visual_targets(result, evidence_by_page)
+        if eligible_pages is not None:
+            targets = {
+                page_number: target_kind
+                for page_number, target_kind in targets.items()
+                if page_number in eligible_pages
+            }
+        if not targets:
             return
-        # A deliberately disabled optional backend is not a degraded runtime
-        # state and should not add one warning per otherwise valid diagram.
         if getattr(self.vlm_parser, "enabled", None) is False:
-            return
-        candidates = [candidate for candidate in result._picture_candidates if isinstance(candidate, PictureCandidate)]
-        page_by_number = {page.page_number: page for page in result.pages}
-        candidates = [
-            candidate
-            for candidate in candidates
-            if candidate.page_number in page_by_number and self._DIAGRAM_HINT.search(candidate.caption)
-        ]
-        if not candidates:
-            return
-        await self._notify_postprocess(
-            progress_callback,
-            result.processed_pages,
-            len(result.pages),
-            "postprocess.diagram",
-        )
-        status = await self.vlm_parser.probe()
-        if not status.ready:
             result.warnings.append(
                 ParseWarning(
-                    code="diagram_enrichment_unavailable",
-                    message="a diagram was retained as an image placeholder because the VLM backend was unavailable",
+                    code="visual_fusion_unavailable",
+                    message="complex visual pages were retained because Qwen is disabled",
                     backend=self.vlm_parser.name,
-                    details={
-                        "pages": sorted({candidate.page_number for candidate in candidates}),
-                        "source_retained": "markdown_image_placeholder",
-                    },
+                    details={"pages": sorted(targets)},
+                )
+            )
+            return
+        qwen_status = await self.vlm_parser.probe()
+        if not qwen_status.ready:
+            result.warnings.append(
+                ParseWarning(
+                    code="visual_fusion_unavailable",
+                    message="complex visual pages were retained because Qwen is unavailable",
+                    backend=self.vlm_parser.name,
+                    details={"pages": sorted(targets)},
                 )
             )
             return
 
-        enriched_pages: set[int] = set()
-        for candidate in candidates:
+        glm_result: DocumentParseResult | None = None
+        if bool(setting(self.settings, "glm_sdk_enabled", False)):
+            glm_status = await self.glm_sdk_parser.probe()
+            if glm_status.ready:
+                sdk_options = options.model_copy(
+                    update={"unit_range": format_page_range(sorted(targets))}
+                )
+                try:
+                    glm_result = await self.glm_sdk_parser.parse(
+                        source,
+                        sdk_options,
+                        document_id=document_id,
+                        cancel_event=cancel_event,
+                    )
+                except (ParserCancelledError, asyncio.CancelledError):
+                    raise
+                except ParserError:
+                    glm_result = None
+
+        primary_by_page = {page.page_number: page for page in result.pages}
+        glm_by_page = (
+            {page.page_number: page for page in glm_result.pages} if glm_result is not None else {}
+        )
+        glm_fragments_by_page: dict[int, list[object]] = {}
+        if glm_result is not None:
+            for fragment in glm_result._table_fragments:
+                page_number = getattr(fragment, "page_number", None)
+                if isinstance(page_number, int):
+                    glm_fragments_by_page.setdefault(page_number, []).append(fragment)
+        primary_fragments_by_page: dict[int, list[object]] = {}
+        for fragment in result._table_fragments:
+            page_number = getattr(fragment, "page_number", None)
+            if isinstance(page_number, int):
+                primary_fragments_by_page.setdefault(page_number, []).append(fragment)
+
+        adopted: dict[int, PageParseResult] = {}
+        visual_page_irs: dict[int, object] = {}
+        replacement_fragments: list[object] = []
+        for page_number, target_kind in sorted(targets.items()):
             if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
                 raise ParserCancelledError("job was cancelled")
-            page = page_by_number[candidate.page_number]
+            primary = primary_by_page[page_number]
+            glm_page = glm_by_page.get(page_number)
+            glm_fragments = [
+                fragment
+                for fragment in glm_fragments_by_page.get(page_number, [])
+                if hasattr(fragment, "rows")
+            ]
+            docling_fragments = [
+                fragment
+                for fragment in primary_fragments_by_page.get(page_number, [])
+                if hasattr(fragment, "rows")
+            ]
             try:
-                mermaid = await self.vlm_parser.diagram_to_mermaid(
-                    source,
-                    page_number=candidate.page_number,
-                    normalized_bbox=candidate.normalized_bbox,
-                    caption=candidate.caption,
-                    languages=options.language,
-                    profile=options.profile.value,
-                )
-                enriched = self._insert_after_picture_placeholder(
-                    page.content or "",
-                    candidate.placeholder_index,
-                    mermaid,
-                )
-                if enriched is None:
-                    raise ParserError("diagram placeholder no longer matches Docling reading order")
-                page.content = enriched
-                enriched_pages.add(candidate.page_number)
+                if target_kind == "table":
+                    outcome = await self.visual_fusion_service.fuse_table_page(
+                        source,
+                        options,
+                        primary,
+                        evidence_by_page[page_number],
+                        glm_page,
+                        glm_fragments,  # type: ignore[arg-type]
+                        docling_fragments,  # type: ignore[arg-type]
+                    )
+                else:
+                    outcome = await self.visual_fusion_service.fuse_signature_page(
+                        source,
+                        options,
+                        primary,
+                        evidence_by_page[page_number],
+                        glm_page,
+                    )
             except (ParserCancelledError, asyncio.CancelledError):
                 raise
             except Exception as exc:
-                result.warnings.append(
+                primary.status = PageStatus.WARNING
+                primary.warnings.append(
                     ParseWarning(
-                        code="diagram_enrichment_failed",
-                        message="a diagram was retained as an image placeholder because strict Mermaid generation failed",
-                        page_number=candidate.page_number,
+                        code="visual_fusion_partial",
+                        message="regional visual fusion failed and retained the primary page",
+                        page_number=page_number,
                         backend=self.vlm_parser.name,
-                        details={
-                            "reason": type(exc).__name__,
-                            "source_retained": "markdown_image_placeholder",
-                        },
+                        details={"reason": type(exc).__name__, "target_kind": target_kind},
                     )
                 )
+                continue
+            adopted[page_number] = outcome.page
+            visual_page_irs[page_number] = outcome.ir
+            replacement_fragments.extend(outcome.fragments)
 
-        if enriched_pages:
-            result.pipeline.vlm = self.vlm_parser.name
-            result._vlm_page_numbers.update(enriched_pages)
-            result.route_summary.vlm_pages = len(result._vlm_page_numbers)
-            result.warnings.append(
-                ParseWarning(
-                    code="diagram_mermaid_generated",
-                    message=f"VLM generated validated Mermaid for diagrams on {len(enriched_pages)} page(s)",
-                    severity=WarningSeverity.INFO,
-                    backend=self.vlm_parser.name,
-                    details={
-                        "pages": sorted(enriched_pages),
-                        "derived": True,
-                        "source_retained": "original_document_and_markdown_image_placeholder",
-                        "validation": "strict_flowchart_with_edges",
-                        "crops": [
-                            {
-                                "page_number": candidate.page_number,
-                                "normalized_bbox": list(candidate.normalized_bbox),
-                            }
-                            for candidate in candidates
-                            if candidate.page_number in enriched_pages
-                        ],
-                    },
-                )
-            )
-
-    async def _apply_vlm_fallback(
-        self,
-        result: DocumentParseResult,
-        source: StoredSource,
-        options: DocumentParseOptions,
-        fallback_pages: list[int],
-        *,
-        document_id: str,
-        cancel_event: object | None,
-    ) -> None:
-        status = await self.vlm_parser.probe()
-        if not status.ready:
-            result.warnings.append(
-                ParseWarning(
-                    code="vlm_fallback_unavailable",
-                    message="quality fallback was requested but the VLM backend is unavailable",
-                    backend=self.vlm_parser.name,
-                )
-            )
+        if not adopted:
             return
-        fallback_options = options.model_copy(
-            update={
-                "mode": ParseMode.VLM,
-                "page_range": format_page_range(fallback_pages),
-                "enable_vlm_fallback": False,
-            }
-        )
-        try:
-            fallback = await self.vlm_parser.parse(
-                source,
-                fallback_options,
-                document_id=document_id,
-                cancel_event=cancel_event,
-            )
-        except ParserError as exc:
-            result.warnings.append(
-                ParseWarning(
-                    code="vlm_fallback_failed",
-                    message=f"VLM fallback failed: {type(exc).__name__}",
-                    backend=self.vlm_parser.name,
-                )
-            )
-            return
-        replacements = self._usable_replacements(fallback, set(fallback_pages))
-        if not replacements:
-            return
-        resolved_page_warnings = [
-            warning
-            for page in result.pages
-            if page.page_number in replacements
-            for warning in page.warnings
+        result.pages = [adopted.get(page.page_number, page) for page in result.pages]
+        result._table_fragments = [
+            fragment
+            for fragment in result._table_fragments
+            if getattr(fragment, "page_number", None) not in adopted
         ]
-        mirrored_warning_counts = Counter(
-            self._warning_fingerprint(warning) for warning in resolved_page_warnings
+        result._table_fragments.extend(replacement_fragments)
+        result._visual_page_irs.update(visual_page_irs)
+        result.warnings = [
+            warning
+            for warning in result.warnings
+            if not (
+                warning.page_number in adopted
+                and warning.code in self.visual_fusion_service._RESOLVED_WARNING_CODES
+            )
+        ]
+        result.pipeline.primary = "visual-fusion"
+        result.pipeline.ocr = (
+            self.glm_sdk_parser.name if glm_result is not None else result.pipeline.ocr
         )
-        retained_document_warnings: list[ParseWarning] = []
-        for warning in result.warnings:
-            fingerprint = self._warning_fingerprint(warning)
-            if mirrored_warning_counts[fingerprint] > 0:
-                mirrored_warning_counts[fingerprint] -= 1
-            else:
-                retained_document_warnings.append(warning)
-        result.warnings = retained_document_warnings
-        result.pages = [replacements.get(page.page_number, page) for page in result.pages]
         result.pipeline.vlm = self.vlm_parser.name
-        result._vlm_page_numbers.update(replacements)
+        result._vlm_page_numbers.update(adopted)
         result.route_summary.vlm_pages = len(result._vlm_page_numbers)
         result.warnings.append(
             ParseWarning(
-                code="vlm_fallback_used",
-                message=f"VLM fallback replaced {len(replacements)} page(s) after quality checks",
+                code="qwen_visual_fusion_used",
+                message=f"Qwen regional visual fusion assembled {len(adopted)} page(s)",
                 severity=WarningSeverity.INFO,
                 backend=self.vlm_parser.name,
-                details={
-                    "pages": sorted(replacements),
-                    "resolved_warnings": [
-                        {"code": code, "page_number": page_number}
-                        for code, page_number in sorted(
-                            {(warning.code, warning.page_number) for warning in resolved_page_warnings},
-                            key=lambda item: (item[1] or 0, item[0]),
-                        )
-                    ],
-                },
+                details={"pages": sorted(adopted)},
             )
-        )
-
-    @staticmethod
-    def _warning_fingerprint(warning: ParseWarning) -> str:
-        """Return a canonical full-value fingerprint for warning mirrors."""
-
-        return json.dumps(
-            warning.model_dump(mode="json"),
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
         )
 
     async def parse(
         self,
         source: StoredSource | str | Path,
-        options: DocumentParseOptions | dict[str, object],
+        options: ContentParseOptions | dict[str, object],
         *,
         document_id: str | None = None,
         progress_callback: ProgressCallback | None = None,
         cancel_event: object | None = None,
     ) -> DocumentParseResult:
         stored = self._coerce_source(source)
-        parsed_options = options if isinstance(options, DocumentParseOptions) else DocumentParseOptions.model_validate(options)
+        parsed_options = (
+            options
+            if isinstance(options, ContentParseOptions)
+            else ContentParseOptions.model_validate(options)
+        )
+        if stored.mime_type in VIDEO_MIME_TYPES and parsed_options.unit_range is not None:
+            raise ServiceError(
+                "invalid_unit_range", "video inputs do not accept unit_range", status_code=400
+            )
+        if (
+            stored.mime_type == DOCX_MIME
+            or (stored.mime_type in IMAGE_MIME_TYPES and stored.mime_type != "image/tiff")
+        ) and parsed_options.unit_range not in {None, "1"}:
+            raise ServiceError(
+                "invalid_unit_range",
+                "DOCX and single-frame images only accept an omitted unit_range or 1",
+                status_code=400,
+            )
         try:
             parse_page_range(parsed_options.page_range, stored.page_count)
         except PageRangeError as exc:
-            raise ServiceError("invalid_page_range", str(exc), status_code=400) from exc
-        timeout = float(parsed_options.timeout_seconds or setting(self.settings, "document_timeout_seconds", 900))
-        identifier = document_id or new_document_id()
+            raise ServiceError("invalid_unit_range", str(exc), status_code=400) from exc
+        timeout = float(
+            parsed_options.timeout_seconds or setting(self.settings, "content_timeout_seconds", 900)
+        )
+        identifier = document_id or new_content_id()
         started = time.perf_counter()
         try:
             async with asyncio.timeout(timeout):
@@ -982,83 +1436,142 @@ class ParserService:
                 try:
                     if not self._initialized:
                         await self.initialize()
+                    if stored.mime_type in VIDEO_MIME_TYPES:
+                        return await self.multimodal_service.parse_video(
+                            stored,
+                            parsed_options,
+                            content_id=identifier,
+                            progress_callback=progress_callback,
+                            cancel_event=cancel_event,
+                        )
+                    if stored.mime_type in {DOCX_MIME, PPTX_MIME}:
+                        async with self._semaphore:
+                            return await self.multimodal_service.parse_office(
+                                stored,
+                                parsed_options,
+                                content_id=identifier,
+                                progress_callback=progress_callback,
+                                cancel_event=cancel_event,
+                                image_parser=self.standard_parser,
+                            )
                     # Resolve after the reload gate: a waiter must never retain a
                     # parser instance that reload has just closed and replaced.
-                    parser = self.registry.get(parsed_options.mode)
+                    execution_options = parsed_options
+                    parser: DocumentParser = self.standard_parser
                     async with self._semaphore:
                         result = await parser.parse(
                             stored,
-                            parsed_options,
+                            execution_options,
                             document_id=identifier,
                             progress_callback=progress_callback,
                             cancel_event=cancel_event,
                         )
-                        if parsed_options.mode == ParseMode.AUTO:
-                            suspicious_pages = self.quality_service.suspicious_unicode_pages(result)
-                            if suspicious_pages:
-                                await self._repair_auto_mojibake(
-                                    result,
-                                    stored,
-                                    parsed_options,
-                                    suspicious_pages,
-                                    document_id=identifier,
-                                    cancel_event=cancel_event,
-                                    progress_callback=progress_callback,
+                        evidence_by_page = await self._page_evidence(stored, result)
+                        await self._normalize_auto_text(result, stored)
+                        self._normalize_auto_short_mapped_tokens(result)
+                        self._refresh_table_fragment_renderings(result)
+                        glyph_repaired_pages = [
+                            page.page_number
+                            for page in result.pages
+                            if (evidence := evidence_by_page.get(page.page_number)) is not None
+                            and self._replace_evidence_glyphs(page, evidence)
+                        ]
+                        for page in result.pages:
+                            if (
+                                page.page_number in glyph_repaired_pages
+                                and not self._suspicious_glyph_counts(page.content or "")
+                            ):
+                                page.warnings = [
+                                    warning
+                                    for warning in page.warnings
+                                    if warning.code != "suspicious_unicode_glyphs"
+                                ]
+                        if glyph_repaired_pages:
+                            result.warnings.append(
+                                ParseWarning(
+                                    code="native_glyph_repaired",
+                                    message=f"font and position evidence repaired glyphs on {len(glyph_repaired_pages)} page(s)",
+                                    severity=WarningSeverity.INFO,
+                                    backend="pymupdf-native",
+                                    details={"pages": glyph_repaired_pages},
                                 )
-                            await self._normalize_auto_text(result, stored)
-                            self._normalize_auto_short_mapped_tokens(result)
+                            )
+                        for page_number in self.quality_service.suspicious_unicode_pages(result):
+                            page = next(
+                                item for item in result.pages if item.page_number == page_number
+                            )
+                            page.status = PageStatus.WARNING
+                            if not any(
+                                warning.code == "suspicious_unicode_mojibake"
+                                for warning in page.warnings
+                            ):
+                                page.warnings.append(
+                                    ParseWarning(
+                                        code="suspicious_unicode_mojibake",
+                                        message="native font and position evidence could not safely repair a broken ToUnicode mapping",
+                                        page_number=page.page_number,
+                                        backend=page.backend,
+                                    )
+                                )
+                        self._remove_unanchored_table_numbers(result, evidence_by_page)
+                        self._repair_split_headings(result, evidence_by_page)
+                        self._repair_native_reading_order(result, evidence_by_page)
+                        self._normalize_directory_pages(result, evidence_by_page)
                         self._finalize_exports(result, parsed_options)
-                        assessment = self.quality_service.assess(result)
-                        if (
-                            parsed_options.mode == ParseMode.AUTO
-                            and parsed_options.enable_vlm_fallback
-                            and not assessment.acceptable
-                            and assessment.fallback_pages
-                        ):
-                            await self._apply_vlm_fallback(
+                        self.quality_service.assess(result)
+                        visual_requested = (
+                            parsed_options.profile.value == "accurate"
+                            and parsed_options.resolved_vlm_policy == VlmPolicy.AUTO_VISUAL
+                        )
+                        if visual_requested:
+                            await self._apply_visual_fusion(
                                 result,
                                 stored,
-                                parsed_options,
-                                assessment.fallback_pages,
+                                execution_options,
+                                evidence_by_page,
                                 document_id=identifier,
                                 cancel_event=cancel_event,
                             )
                             self._finalize_exports(result, parsed_options)
                             self.quality_service.assess(result)
-                        if parsed_options.mode == ParseMode.AUTO:
-                            try:
-                                await self._enrich_auto_diagrams(
-                                    result,
-                                    stored,
-                                    parsed_options,
-                                    cancel_event=cancel_event,
-                                    progress_callback=progress_callback,
-                                )
-                            except (ParserCancelledError, asyncio.CancelledError):
-                                raise
-                            except Exception as exc:
-                                result.warnings.append(
-                                    ParseWarning(
-                                        code="diagram_enrichment_failed",
-                                        message="diagram enrichment failed unexpectedly; the source placeholder was retained",
-                                        backend=self.vlm_parser.name,
-                                        details={
-                                            "reason": type(exc).__name__,
-                                            "source_retained": "markdown_image_placeholder",
-                                        },
-                                    )
-                                )
-                            self._finalize_exports(result, parsed_options)
-                        result.usage.duration_ms = max(0, round((time.perf_counter() - started) * 1000))
+                        result.usage.duration_ms = max(
+                            0, round((time.perf_counter() - started) * 1000)
+                        )
+                        result.evidence_ir = self.ir_service.build(
+                            result,
+                            stored,
+                            evidence_by_page,
+                        )
+                        await self.multimodal_service.enrich_page_content(
+                            result.evidence_ir,
+                            result,
+                            stored,
+                            evidence_by_page,
+                            parsed_options,
+                            image_parser=self.standard_parser,
+                            cancel_event=cancel_event,
+                        )
+                        result.markdown = result.evidence_ir.renderings.markdown
+                        result.plain_text = result.evidence_ir.renderings.plain_text
+                        if not parsed_options.include_renderings:
+                            result.evidence_ir.renderings.markdown = ""
+                            result.evidence_ir.renderings.plain_text = ""
+                            for page_ir in result.evidence_ir.units:
+                                page_ir.renderings.markdown = ""
+                                page_ir.renderings.plain_text = ""
+                            result.markdown = ""
+                            result.plain_text = ""
                         return result
                 finally:
                     await self._leave_parse()
         except TimeoutError as exc:
-            raise ServiceError("parse_timeout", f"document parsing exceeded {timeout:g} seconds", status_code=504) from exc
+            raise ServiceError(
+                "parse_timeout", f"content parsing exceeded {timeout:g} seconds", status_code=504
+            ) from exc
         except ParserCancelledError as exc:
             raise ServiceError("job_cancelled", str(exc), status_code=409) from exc
         except ParserUnavailableError as exc:
-            details: dict[str, object] = {"mode": parsed_options.mode.value}
+            details: dict[str, object] = {"profile": parsed_options.profile.value}
             if exc.details:
                 details.update(exc.details)
             raise ServiceError(

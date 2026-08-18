@@ -24,7 +24,9 @@ class CleanupService:
         self.repository = repository
         self.storage = storage
 
-    async def cleanup_expired(self, now: datetime | None = None, *, limit: int = 1_000) -> CleanupResult:
+    async def cleanup_expired(
+        self, now: datetime | None = None, *, limit: int = 1_000
+    ) -> CleanupResult:
         expired = await self.repository.list_expired(now or datetime.now(UTC), limit=limit)
         deleted = failed = 0
         for job in expired:

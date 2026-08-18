@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 
 from app.models.backend import BackendStatus
-from app.models.parse_options import DocumentParseOptions
+from app.models.parse_options import ContentParseOptions
 from app.models.parse_result import DocumentParseResult
 from app.models.source import StoredSource
 
@@ -46,7 +46,7 @@ class DocumentParser(ABC):
     async def parse(
         self,
         source: StoredSource,
-        options: DocumentParseOptions,
+        options: ContentParseOptions,
         *,
         document_id: str,
         progress_callback: ProgressCallback | None = None,
@@ -55,4 +55,3 @@ class DocumentParser(ABC):
 
     async def close(self) -> None:
         return None
-

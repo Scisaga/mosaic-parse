@@ -18,6 +18,7 @@ static
 data
 models
 benchmark-results
+pdf_sample
 tests
 docs
 scripts

@@ -116,8 +116,8 @@ jobs:
           GLM_OCR_ENABLED: "0"
           VLM_ENABLED: "0"
           DOCLING_MODEL_DOWNLOAD: "0"
-          DATA_DIR: ${{ runner.temp }}/docling-glm-data
-          STATIC_DIR: ${{ runner.temp }}/docling-glm-static
+          DATA_DIR: ${{ runner.temp }}/mosaicparse-data
+          STATIC_DIR: ${{ runner.temp }}/mosaicparse-static
         run: |
           uv run ruff check app scripts tests
           uv run mypy app
@@ -142,7 +142,9 @@ jobs:
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ghcr.io/scisaga/mosaic-parse
+          labels: |
+            org.opencontainers.image.source=https://github.com/Scisaga/mosaic-parse
           tags: |
             type=raw,value=latest,enable=${{ github.event_name == 'workflow_run' }}
             type=raw,value=main,enable=${{ github.event_name == 'workflow_run' }}
@@ -153,21 +155,23 @@ jobs:
       - name: Build image for smoke testing
         run: |
           docker buildx build --load \
-            --tag docling-glm-parser:publish-candidate \
+            --tag mosaic-parse:publish-candidate \
             --cache-from type=gha \
             --cache-to type=gha,mode=max \
             .
 
       - name: Smoke test image startup
         run: |
-          docker run --detach --name docling-glm-parser-smoke \
+          docker run --detach --name mosaicparse-smoke \
             --env DOCLING_MODEL_DOWNLOAD=0 \
             --env GLM_OCR_ENABLED=0 \
             --env VLM_ENABLED=0 \
             --publish 127.0.0.1:12303:12303 \
-            docling-glm-parser:publish-candidate
+            mosaic-parse:publish-candidate
           for attempt in $(seq 1 60); do
             if curl --fail --silent http://127.0.0.1:12303/health >/dev/null; then
+              docker exec mosaicparse-smoke ffmpeg -version >/dev/null
+              docker exec mosaicparse-smoke ffprobe -version >/dev/null
               exit 0
             fi
             echo "health check attempt ${attempt}/60 did not succeed yet"
@@ -178,8 +182,8 @@ jobs:
       - name: Remove smoke-test container
         if: always()
         run: |
-          docker logs docling-glm-parser-smoke || true
-          docker rm --force docling-glm-parser-smoke || true
+          docker logs mosaicparse-smoke || true
+          docker rm --force mosaicparse-smoke || true
 
       - name: Recheck main immediately before publishing mutable tags
         if: github.event_name == 'workflow_run'

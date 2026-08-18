@@ -41,13 +41,19 @@ def _normalized_url(url: str) -> tuple[str, str, int | None]:
         parsed = urlsplit(url.strip())
         port = parsed.port
     except ValueError as exc:
-        raise SourceUrlError("invalid_source_url", "source URL has an invalid port or authority") from exc
+        raise SourceUrlError(
+            "invalid_source_url", "source URL has an invalid port or authority"
+        ) from exc
     if parsed.scheme.lower() not in {"http", "https"}:
-        raise SourceUrlError("invalid_source_url_scheme", "only HTTP and HTTPS source URLs are allowed")
+        raise SourceUrlError(
+            "invalid_source_url_scheme", "only HTTP and HTTPS source URLs are allowed"
+        )
     if not parsed.hostname:
         raise SourceUrlError("invalid_source_url", "source URL must include a hostname")
     if parsed.username is not None or parsed.password is not None:
-        raise SourceUrlError("source_url_credentials_forbidden", "credentials in source URLs are not allowed")
+        raise SourceUrlError(
+            "source_url_credentials_forbidden", "credentials in source URLs are not allowed"
+        )
     hostname = parsed.hostname.rstrip(".").lower()
     if hostname in _BLOCKED_HOSTNAMES or hostname.endswith(".localhost"):
         raise SourceUrlError("source_url_blocked", "localhost and metadata hosts are not allowed")
@@ -84,7 +90,9 @@ async def _resolve(hostname: str, port: int | None) -> tuple[str, ...]:
     try:
         return await asyncio.to_thread(lookup)
     except socket.gaierror as exc:
-        raise SourceUrlError("source_url_dns_failed", "source URL hostname could not be resolved") from exc
+        raise SourceUrlError(
+            "source_url_dns_failed", "source URL hostname could not be resolved"
+        ) from exc
 
 
 async def validate_source_url(url: str, *, allow_private: bool = False) -> ValidatedSourceUrl:
@@ -96,12 +104,20 @@ async def validate_source_url(url: str, *, allow_private: bool = False) -> Valid
     except ValueError:
         addresses = await _resolve(hostname, port)
     if not addresses:
-        raise SourceUrlError("source_url_dns_failed", "source URL hostname resolved to no addresses")
-    blocked = [address for address in addresses if not is_public_address(address, allow_private=allow_private)]
+        raise SourceUrlError(
+            "source_url_dns_failed", "source URL hostname resolved to no addresses"
+        )
+    blocked = [
+        address
+        for address in addresses
+        if not is_public_address(address, allow_private=allow_private)
+    ]
     # Reject the whole hostname if any answer is unsafe; accepting just one answer
     # leaves room for resolver/load-balancer based SSRF bypasses.
     if blocked:
-        raise SourceUrlError("source_url_blocked", "source URL resolves to a prohibited network address")
+        raise SourceUrlError(
+            "source_url_blocked", "source URL resolves to a prohibited network address"
+        )
     return ValidatedSourceUrl(url=normalized, hostname=hostname, addresses=addresses)
 
 

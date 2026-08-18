@@ -34,9 +34,9 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    app_name: str = "Docling GLM"
-    app_id: str = "docling-glm-parser"
-    version: str = "0.1.0"
+    app_name: str = "MosaicParse"
+    app_id: str = "mosaicparse"
+    version: str = "0.3.0"
     host: str = "0.0.0.0"
     port: int = Field(default=12303, ge=1, le=65535)
     tz: str = "Asia/Shanghai"
@@ -50,15 +50,29 @@ class Settings(BaseSettings):
     cors_origins: str = ""
 
     max_upload_bytes: int = Field(default=200 * 1024 * 1024, gt=0)
-    max_document_pages: int = Field(default=1000, gt=0)
+    max_content_units: int = Field(default=1000, gt=0)
     sync_max_bytes: int = Field(default=20 * 1024 * 1024, gt=0)
-    sync_max_pages: int = Field(default=10, gt=0)
+    sync_max_units: int = Field(default=10, gt=0)
     max_queued_jobs: int = Field(default=8, ge=1)
     parser_workers: int = Field(default=1, ge=1, le=32)
     job_retention_hours: int = Field(default=24, ge=1)
-    document_timeout_seconds: int = Field(default=900, ge=1)
+    content_timeout_seconds: int = Field(default=900, ge=1)
     sse_heartbeat_seconds: float = Field(default=15.0, gt=0)
     backend_health_ttl_seconds: float = Field(default=15.0, ge=0)
+    max_video_seconds: int = Field(default=30 * 60, ge=1)
+    video_max_keyframes: int = Field(default=24, ge=2, le=96)
+    video_min_frame_spacing_seconds: float = Field(default=2.0, ge=0)
+    video_scene_threshold: float = Field(default=0.30, ge=0, le=1)
+    video_max_frame_pixels: int = Field(default=7680 * 4320, gt=0)
+    ffmpeg_max_concurrency: int = Field(default=1, ge=1, le=8)
+    ffmpeg_threads: int = Field(default=2, ge=1, le=16)
+    ffmpeg_max_alloc_bytes: int = Field(default=512 * 1024 * 1024, gt=0)
+    ffmpeg_timeout_seconds: float = Field(default=300.0, gt=0)
+    max_assets_per_content: int = Field(default=200, ge=1)
+    max_asset_bytes: int = Field(default=50 * 1024 * 1024, gt=0)
+    max_extracted_asset_bytes: int = Field(default=400 * 1024 * 1024, gt=0)
+    max_asset_image_pixels: int = Field(default=100_000_000, gt=0)
+    media_vlm_max_pixels: int = Field(default=4_500_000, gt=0)
 
     docling_device: str = "cpu"
     # Prefer the application-specific name: upstream Docling also consumes
@@ -75,6 +89,23 @@ class Settings(BaseSettings):
     docling_force_backend_text: bool = False
     docling_model_download: bool = True
     docling_compile_models: bool = False
+    docling_do_cell_matching: bool = True
+
+    quality_sparse_native_characters: int = Field(default=40, ge=0)
+    quality_sparse_max_image_coverage: float = Field(default=0.05, ge=0, le=1)
+    quality_sparse_max_ink_ratio: float = Field(default=0.015, ge=0, le=1)
+    quality_native_max_image_coverage: float = Field(default=0.20, ge=0, le=1)
+    quality_scanned_min_image_coverage: float = Field(default=0.80, ge=0, le=1)
+    quality_scanned_min_ink_ratio: float = Field(default=0.03, ge=0, le=1)
+    quality_reading_order_min_anchors: int = Field(default=4, ge=2)
+    quality_native_repair_min_coverage: float = Field(default=0.98, ge=0, le=1)
+    quality_native_repair_min_length_ratio: float = Field(default=0.95, gt=0)
+    quality_native_repair_max_length_ratio: float = Field(default=1.05, gt=0)
+    quality_table_min_grid_area_ratio: float = Field(default=0.25, ge=0, le=1)
+    quality_vlm_numeric_precision: float = Field(default=0.99, ge=0, le=1)
+    quality_vlm_numeric_recall: float = Field(default=0.95, ge=0, le=1)
+    native_text_repair_enabled: bool = True
+    cross_page_table_merge_enabled: bool = True
 
     glm_ocr_enabled: bool = True
     glm_ocr_api_url: str = "http://glm-ocr:8000/v1/chat/completions"
@@ -95,29 +126,45 @@ class Settings(BaseSettings):
 
     glm_sdk_enabled: bool = False
     glm_sdk_url: str = "http://glm-ocr-sdk:5002/glmocr/parse"
+    glm_sdk_timeout_seconds: float = Field(default=120.0, gt=0)
+    glm_sdk_render_scale: float = Field(default=2.0, gt=0)
+    glm_sdk_max_image_pixels: int = Field(default=8_000_000, gt=0)
+    glm_sdk_max_concurrency: int = Field(default=1, ge=1, le=16)
+    glm_sdk_max_retries: int = Field(default=1, ge=0, le=5)
+    visual_router_enabled: bool = True
 
     vlm_enabled: bool = False
     vlm_base_url: str = "http://5090-host:11434/v1"
     vlm_api_key: OptionalSecret = "ollama"
-    vlm_model: str = "qwen3.6:35b"
-    vlm_max_concurrency: int = Field(default=1, ge=1)
+    vlm_model: str = "qwen3.6-docparse:35b-32k"
+    vlm_max_concurrency: int = Field(default=1, ge=1, le=1)
     vlm_timeout_seconds: float = Field(default=300.0, gt=0)
     vlm_temperature: float = Field(default=0.0, ge=0)
     vlm_max_retries: int = Field(default=1, ge=0)
+    vlm_page_budget_seconds: float = Field(default=180.0, gt=0, le=180.0)
+    vlm_max_calls_per_page: int = Field(default=3, ge=1, le=3)
+    vlm_plan_max_tokens: int = Field(default=4_096, ge=1)
+    vlm_region_max_tokens: int = Field(default=16_384, ge=1)
+    vlm_conflict_max_tokens: int = Field(default=8_192, ge=1)
+    media_vlm_max_tokens: int = Field(default=4_096, ge=1)
+    video_summary_max_tokens: int = Field(default=4_096, ge=1)
+    media_vlm_reasoning_effort: Literal["none", "low", "medium", "high"] = "none"
+    video_summary_reasoning_effort: Literal["none", "low", "medium", "high"] = "none"
+    vlm_reasoning_effort: Literal["none", "low", "medium", "high"] = "low"
+    vlm_conflict_reasoning_effort: Literal["none", "low", "medium", "high"] = "medium"
     # Independently switchable for remote-call cost/privacy control. The
     # service also requires vlm_enabled before making an enrichment request.
-    vlm_diagram_enrichment_enabled: bool = True
 
     allow_source_urls: bool = True
     allow_private_source_urls: bool = False
     source_url_max_redirects: int = Field(default=3, ge=0, le=20)
     source_url_timeout_seconds: float = Field(default=30.0, gt=0)
-    source_url_user_agent: str = "docling-glm-parser/0.1"
+    source_url_user_agent: str = "mosaicparse/0.3"
 
     mcp_enabled: bool = True
     mcp_max_inline_bytes: int = Field(default=2 * 1024 * 1024, gt=0)
     mcp_max_result_chars: int = Field(default=200_000, gt=0)
-    mcp_allowed_hosts: str = "localhost,127.0.0.1,[::1],parser,docling_glm_parser"
+    mcp_allowed_hosts: str = "localhost,127.0.0.1,[::1],mosaicparse"
     mcp_allowed_origins: str = ""
 
     @field_validator("docling_device")
@@ -146,8 +193,8 @@ class Settings(BaseSettings):
     def validate_limits(self) -> Settings:
         if self.sync_max_bytes > self.max_upload_bytes:
             raise ValueError("SYNC_MAX_BYTES cannot exceed MAX_UPLOAD_BYTES")
-        if self.sync_max_pages > self.max_document_pages:
-            raise ValueError("SYNC_MAX_PAGES cannot exceed MAX_DOCUMENT_PAGES")
+        if self.sync_max_units > self.max_content_units:
+            raise ValueError("SYNC_MAX_UNITS cannot exceed MAX_CONTENT_UNITS")
         return self
 
     @property
@@ -185,17 +232,24 @@ class Settings(BaseSettings):
 
         return {
             "max_upload_bytes": self.max_upload_bytes,
-            "max_document_pages": self.max_document_pages,
+            "max_content_units": self.max_content_units,
             "sync_max_bytes": self.sync_max_bytes,
-            "sync_max_pages": self.sync_max_pages,
+            "sync_max_units": self.sync_max_units,
             "max_queued_jobs": self.max_queued_jobs,
             "parser_workers": self.parser_workers,
             "job_retention_hours": self.job_retention_hours,
-            "document_timeout_seconds": self.document_timeout_seconds,
+            "content_timeout_seconds": self.content_timeout_seconds,
+            "max_video_seconds": self.max_video_seconds,
+            "video_max_keyframes": self.video_max_keyframes,
+            "video_max_frame_pixels": self.video_max_frame_pixels,
+            "ffmpeg_max_concurrency": self.ffmpeg_max_concurrency,
+            "ffmpeg_threads": self.ffmpeg_threads,
             "docling_device": self.docling_device,
             "source_urls_enabled": self.allow_source_urls,
             "private_source_urls_allowed": self.allow_private_source_urls,
             "glm_ocr_enabled": self.glm_ocr_enabled,
+            "glm_sdk_enabled": self.glm_sdk_enabled,
+            "visual_router_enabled": self.visual_router_enabled,
             "vlm_enabled": self.vlm_enabled,
         }
 

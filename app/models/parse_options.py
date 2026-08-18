@@ -7,16 +7,9 @@ Docling's (frequently evolving) option objects.
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-
-
-class ParseMode(StrEnum):
-    AUTO = "auto"
-    STANDARD = "standard"
-    OCR = "ocr"
-    VLM = "vlm"
 
 
 class ParseProfile(StrEnum):
@@ -25,31 +18,31 @@ class ParseProfile(StrEnum):
     ACCURATE = "accurate"
 
 
-class OutputFormat(StrEnum):
-    MARKDOWN = "markdown"
-    TEXT = "text"
+class VlmPolicy(StrEnum):
+    """Internal routing decision derived from the quality profile."""
+
+    OFF = "off"
+    AUTO_VISUAL = "auto_visual"
 
 
 LanguageCode = Annotated[str, Field(min_length=1, max_length=32)]
 
 
-class DocumentParseOptions(BaseModel):
-    """User-facing options shared by synchronous and asynchronous parsing."""
+class ContentParseOptions(BaseModel):
+    """User-facing options shared by synchronous and asynchronous content parsing."""
 
     model_config = ConfigDict(extra="forbid", use_enum_values=False)
 
-    mode: ParseMode = ParseMode.AUTO
     profile: ParseProfile = ParseProfile.BALANCED
-    output_format: OutputFormat = OutputFormat.MARKDOWN
-    page_range: str | None = Field(default=None, max_length=2_048)
-    language: list[LanguageCode] = Field(default_factory=lambda: ["zh", "en"], min_length=1, max_length=16)
-    enable_vlm_fallback: bool = False
-    preserve_page_breaks: bool = True
-    include_pages: bool = False
-    include_diagnostics: bool = True
+    unit_range: str | None = Field(default=None, max_length=2_048)
+    language: list[LanguageCode] = Field(
+        default_factory=lambda: ["zh", "en"], min_length=1, max_length=16
+    )
+    include_renderings: bool = True
+    description_language: Literal["zh-CN", "en", "auto"] = "zh-CN"
     timeout_seconds: int | None = Field(default=None, ge=1, le=86_400)
 
-    @field_validator("page_range")
+    @field_validator("unit_range")
     @classmethod
     def normalize_page_range(cls, value: str | None) -> str | None:
         if value is None:
@@ -84,3 +77,17 @@ class DocumentParseOptions(BaseModel):
         if not result:
             raise ValueError("at least one OCR language is required")
         return result
+
+    @property
+    def resolved_vlm_policy(self) -> VlmPolicy:
+        """Accurate enables visual fusion; other profiles never call Qwen."""
+
+        if self.profile == ParseProfile.ACCURATE:
+            return VlmPolicy.AUTO_VISUAL
+        return VlmPolicy.OFF
+
+    @property
+    def page_range(self) -> str | None:
+        """Internal adapter for the existing page-oriented document pipeline."""
+
+        return self.unit_range

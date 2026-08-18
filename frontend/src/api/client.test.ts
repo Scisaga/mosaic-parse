@@ -8,14 +8,15 @@ describe('API request helpers', () => {
     const file = new File(['pdf'], '报告.pdf', { type: 'application/pdf' })
     const form = buildParseForm(
       { kind: 'file', file, url: '' },
-      { ...DEFAULT_OPTIONS, mode: 'ocr', pageRange: '2-4', enableVlmFallback: true },
+      { ...DEFAULT_OPTIONS, profile: 'accurate', unitRange: '2-4' },
     )
     expect(form.get('file')).toBeInstanceOf(File)
     expect((form.get('file') as File).name).toBe('报告.pdf')
-    expect(form.get('mode')).toBe('ocr')
-    expect(form.get('page_range')).toBe('2-4')
-    expect(form.get('enable_vlm_fallback')).toBe('true')
-    expect(form.get('include_pages')).toBe('true')
+    expect(form.get('profile')).toBe('accurate')
+    expect(form.get('unit_range')).toBe('2-4')
+    expect(form.get('include_renderings')).toBe('true')
+    expect(form.get('mode')).toBeNull()
+    expect(form.get('vlm_policy')).toBeNull()
   })
 
   it('parses SSE JSON and ignores malformed messages', () => {

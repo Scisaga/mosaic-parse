@@ -58,8 +58,8 @@ export function HeaderStatus({ snapshot, loading, onRefresh, apiKey, onApiKeyCha
       <div className="brand-lockup">
         <img className="brand-logo" src="/logo.png?v=4" alt="" aria-hidden="true" />
         <div className="brand-copy">
-          <h1>Docling GLM</h1>
-          <p>智能文档解析工作台</p>
+          <h1>MosaicParse</h1>
+          <p>多模态内容证据解析</p>
         </div>
       </div>
       <div className="header-operations">

@@ -1,10 +1,10 @@
 import { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
-  cancelDocumentJob,
-  createDocumentJob,
+  cancelContentJob,
+  createContentJob,
   getApiKey,
-  retryDocumentJob,
+  retryContentJob,
   setApiKey,
 } from '../api/client'
 import { HeaderStatus } from '../components/HeaderStatus'
@@ -14,11 +14,11 @@ import { ParseOptionsForm } from '../features/parse-options/ParseOptionsForm'
 import { DocumentPreview } from '../features/preview/DocumentPreview'
 import { ResultPane } from '../features/results/ResultPane'
 import { SourcePicker } from '../features/upload/SourcePicker'
-import { useDocumentJob } from '../hooks/useDocumentJob'
+import { useContentJob } from '../hooks/useContentJob'
 import { usePersistedOptions } from '../hooks/usePersistedOptions'
 import { useServiceHealth } from '../hooks/useServiceHealth'
 import { errorMessage } from '../lib/format'
-import type { DocumentJob, SourceSelection } from '../types/api'
+import type { ContentJob, SourceSelection } from '../types/api'
 
 interface Notice {
   kind: 'success' | 'error' | 'info'
@@ -40,7 +40,7 @@ export function App() {
   const queryClient = useQueryClient()
   const [source, setSource] = useState<SourceSelection>({ kind: 'file', file: null, url: '' })
   const [options, setOptions] = usePersistedOptions()
-  const [seedJob, setSeedJob] = useState<DocumentJob | null>(null)
+  const [seedJob, setSeedJob] = useState<ContentJob | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [actionBusy, setActionBusy] = useState(false)
   const [selectedPage, setSelectedPage] = useState<number | null>(null)
@@ -49,7 +49,7 @@ export function App() {
   const [sourceValidationVisible, setSourceValidationVisible] = useState(false)
   const [apiKeyValue, setApiKeyValue] = useState(getApiKey)
   const health = useServiceHealth()
-  const { job, jobQuery, resultQuery, sseState } = useDocumentJob(seedJob)
+  const { job, jobQuery, resultQuery, sseState } = useContentJob(seedJob)
   const active = job?.status === 'queued' || job?.status === 'running'
   const busy = submitting || active
   const sourceError = validateSource(source)
@@ -70,7 +70,7 @@ export function App() {
     setSelectedPage(null)
     setNotice(null)
     try {
-      const created = await createDocumentJob(source, { ...options, submissionKind: 'async' })
+      const created = await createContentJob(source, options)
       setSeedJob(created)
       notify('success', `任务 ${created.id} 已创建`)
     } catch (error) {
@@ -84,14 +84,14 @@ export function App() {
     if (!job) return
     setActionBusy(true)
     try {
-      const status = await cancelDocumentJob(job.id)
+      const status = await cancelContentJob(job.id)
       if (status === 'deleted') {
-        queryClient.removeQueries({ queryKey: ['document-job', job.id] })
+        queryClient.removeQueries({ queryKey: ['content-job', job.id] })
         setSeedJob(null)
         notify('info', '任务已结束并删除')
       } else {
         setSeedJob({ ...job, status: 'cancelled' })
-        await queryClient.invalidateQueries({ queryKey: ['document-job', job.id] })
+        await queryClient.invalidateQueries({ queryKey: ['content-job', job.id] })
         notify('info', '取消请求已发送')
       }
     } catch (error) {
@@ -105,7 +105,7 @@ export function App() {
     if (!job) return
     setActionBusy(true)
     try {
-      const retried = await retryDocumentJob(job.id, page ? String(page) : undefined)
+      const retried = await retryContentJob(job.id, page ? String(page) : undefined)
       setSeedJob(retried)
       setSelectedPage(page ?? null)
       notify('success', page ? `第 ${page} 页重试任务已创建` : '重试任务已创建')
@@ -120,12 +120,12 @@ export function App() {
     if (job) {
       setActionBusy(true)
       try {
-        await cancelDocumentJob(job.id)
+        await cancelContentJob(job.id)
       } catch (error) {
         notify('error', `服务端任务未删除：${errorMessage(error)}`)
       } finally {
-        queryClient.removeQueries({ queryKey: ['document-job', job.id] })
-        queryClient.removeQueries({ queryKey: ['document-result', job.id] })
+        queryClient.removeQueries({ queryKey: ['content-job', job.id] })
+        queryClient.removeQueries({ queryKey: ['content-result', job.id] })
         setActionBusy(false)
       }
     }
@@ -137,8 +137,8 @@ export function App() {
 
   const changeSource = (next: SourceSelection) => {
     if (job) {
-      queryClient.removeQueries({ queryKey: ['document-job', job.id] })
-      queryClient.removeQueries({ queryKey: ['document-result', job.id] })
+      queryClient.removeQueries({ queryKey: ['content-job', job.id] })
+      queryClient.removeQueries({ queryKey: ['content-result', job.id] })
     }
     setSeedJob(null)
     setSelectedPage(null)

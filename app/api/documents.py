@@ -1,8 +1,8 @@
-"""Document parsing and job creation endpoints."""
+"""Multimodal content parsing and job creation endpoints."""
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, Form, Request, Response, UploadFile, status
 from pydantic import ValidationError
@@ -10,44 +10,59 @@ from pydantic import ValidationError
 from app.api.dependencies import get_runtime, require_api_key
 from app.api.schemas import JobResponse, ParseResponse
 from app.models import (
-    DocumentParseOptions,
-    OutputFormat,
-    ParseMode,
+    ContentParseOptions,
+    JobRecord,
     ParseProfile,
     ServiceError,
 )
 
 router = APIRouter(
-    prefix="/v1/documents",
-    tags=["documents"],
+    prefix="/v1/content",
+    tags=["content"],
     dependencies=[Depends(require_api_key)],
 )
+
+_REMOVED_OPTION_FIELDS = frozenset(
+    {
+        "mode",
+        "output_format",
+        "vlm_policy",
+        "enable_vlm_fallback",
+        "preserve_page_breaks",
+        "include_pages",
+        "include_diagnostics",
+    }
+)
+
+
+async def _reject_removed_options(request: Request) -> None:
+    form = await request.form()
+    removed = sorted(_REMOVED_OPTION_FIELDS.intersection(form.keys()))
+    if removed:
+        raise ServiceError(
+            "removed_options",
+            "Legacy parsing options are not supported",
+            status_code=422,
+            details={"fields": removed},
+        )
 
 
 def _options(
     *,
-    mode: ParseMode,
     profile: ParseProfile,
-    output_format: OutputFormat,
-    page_range: str | None,
+    unit_range: str | None,
     language: str,
-    enable_vlm_fallback: bool,
-    preserve_page_breaks: bool,
-    include_pages: bool,
-    include_diagnostics: bool,
+    description_language: Literal["zh-CN", "en", "auto"],
+    include_renderings: bool,
     timeout_seconds: int | None,
-) -> DocumentParseOptions:
+) -> ContentParseOptions:
     try:
-        return DocumentParseOptions(
-            mode=mode,
+        return ContentParseOptions(
             profile=profile,
-            output_format=output_format,
-            page_range=page_range,
+            unit_range=unit_range,
             language=[item.strip() for item in language.split(",") if item.strip()],
-            enable_vlm_fallback=enable_vlm_fallback,
-            preserve_page_breaks=preserve_page_breaks,
-            include_pages=include_pages,
-            include_diagnostics=include_diagnostics,
+            description_language=description_language,
+            include_renderings=include_renderings,
             timeout_seconds=timeout_seconds,
         )
     except ValidationError as exc:
@@ -79,55 +94,48 @@ def _validate_source(file: UploadFile | None, source_url: str | None) -> None:
 @router.post(
     "/parse",
     response_model=ParseResponse | JobResponse,
-    summary="Parse a small document synchronously",
-    responses={409: {"description": "The source exceeds synchronous limits"}},
+    summary="Parse content synchronously or automatically create an asynchronous job",
 )
-async def parse_document(
+async def parse_content(
     request: Request,
     response: Response,
-    file: Annotated[UploadFile | None, File(description="PDF or supported image")] = None,
-    source_url: Annotated[str | None, Form(description="HTTP(S) document URL")] = None,
-    mode: Annotated[ParseMode, Form()] = ParseMode.AUTO,
+    file: Annotated[
+        UploadFile | None, File(description="Supported document, image, or video")
+    ] = None,
+    source_url: Annotated[str | None, Form(description="HTTP(S) content URL")] = None,
     profile: Annotated[ParseProfile, Form()] = ParseProfile.BALANCED,
-    output_format: Annotated[OutputFormat, Form()] = OutputFormat.MARKDOWN,
-    page_range: Annotated[str | None, Form(description="One-based ranges, e.g. 1-5,8")] = None,
+    unit_range: Annotated[
+        str | None, Form(description="One-based page or slide ranges, e.g. 1-5,8")
+    ] = None,
     language: Annotated[str, Form(description="Comma-separated OCR languages")] = "zh,en",
-    enable_vlm_fallback: Annotated[bool, Form()] = False,
-    preserve_page_breaks: Annotated[bool, Form()] = True,
-    include_pages: Annotated[bool, Form()] = False,
-    include_diagnostics: Annotated[bool, Form()] = True,
+    description_language: Annotated[Literal["zh-CN", "en", "auto"], Form()] = "zh-CN",
+    include_renderings: Annotated[bool, Form()] = True,
     timeout_seconds: Annotated[int | None, Form(ge=1, le=86_400)] = None,
     prefer_async: Annotated[bool, Form()] = False,
 ) -> ParseResponse | JobResponse:
+    await _reject_removed_options(request)
     _validate_source(file, source_url)
     options = _options(
-        mode=mode,
         profile=profile,
-        output_format=output_format,
-        page_range=page_range,
+        unit_range=unit_range,
         language=language,
-        enable_vlm_fallback=enable_vlm_fallback,
-        preserve_page_breaks=preserve_page_breaks,
-        include_pages=include_pages,
-        include_diagnostics=include_diagnostics,
+        description_language=description_language,
+        include_renderings=include_renderings,
         timeout_seconds=timeout_seconds,
     )
     runtime = get_runtime(request)
-    if prefer_async:
-        job = await runtime.job_service.create_job(
-            file=file,
-            source_url=source_url,
-            options=options,
-        )
-        response.status_code = status.HTTP_202_ACCEPTED
-        return JobResponse.from_record(job)
-
-    result = await runtime.job_service.parse_sync(
+    result = await runtime.job_service.parse_content(
         file=file,
         source_url=source_url,
         options=options,
+        prefer_async=prefer_async,
     )
-    return ParseResponse.from_result(result, options)
+    if isinstance(result, JobRecord):
+        response.status_code = status.HTTP_202_ACCEPTED
+        return JobResponse.from_record(result)
+    if result.evidence_ir is None:
+        raise ServiceError("ir_missing", "content evidence IR was not produced", status_code=500)
+    return result.evidence_ir
 
 
 @router.post(
@@ -136,32 +144,29 @@ async def parse_document(
     status_code=status.HTTP_202_ACCEPTED,
     summary="Create an asynchronous parsing job",
 )
-async def create_document_job(
+async def create_content_job(
     request: Request,
-    file: Annotated[UploadFile | None, File(description="PDF or supported image")] = None,
-    source_url: Annotated[str | None, Form(description="HTTP(S) document URL")] = None,
-    mode: Annotated[ParseMode, Form()] = ParseMode.AUTO,
+    file: Annotated[
+        UploadFile | None, File(description="Supported document, image, or video")
+    ] = None,
+    source_url: Annotated[str | None, Form(description="HTTP(S) content URL")] = None,
     profile: Annotated[ParseProfile, Form()] = ParseProfile.BALANCED,
-    output_format: Annotated[OutputFormat, Form()] = OutputFormat.MARKDOWN,
-    page_range: Annotated[str | None, Form(description="One-based ranges, e.g. 1-5,8")] = None,
+    unit_range: Annotated[
+        str | None, Form(description="One-based page or slide ranges, e.g. 1-5,8")
+    ] = None,
     language: Annotated[str, Form(description="Comma-separated OCR languages")] = "zh,en",
-    enable_vlm_fallback: Annotated[bool, Form()] = False,
-    preserve_page_breaks: Annotated[bool, Form()] = True,
-    include_pages: Annotated[bool, Form()] = False,
-    include_diagnostics: Annotated[bool, Form()] = True,
+    description_language: Annotated[Literal["zh-CN", "en", "auto"], Form()] = "zh-CN",
+    include_renderings: Annotated[bool, Form()] = True,
     timeout_seconds: Annotated[int | None, Form(ge=1, le=86_400)] = None,
 ) -> JobResponse:
+    await _reject_removed_options(request)
     _validate_source(file, source_url)
     options = _options(
-        mode=mode,
         profile=profile,
-        output_format=output_format,
-        page_range=page_range,
+        unit_range=unit_range,
         language=language,
-        enable_vlm_fallback=enable_vlm_fallback,
-        preserve_page_breaks=preserve_page_breaks,
-        include_pages=include_pages,
-        include_diagnostics=include_diagnostics,
+        description_language=description_language,
+        include_renderings=include_renderings,
         timeout_seconds=timeout_seconds,
     )
     job = await get_runtime(request).job_service.create_job(

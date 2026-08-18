@@ -1,5 +1,5 @@
 import { render, screen } from '@testing-library/react'
-import type { DocumentJob } from '../../types/api'
+import type { ContentJob } from '../../types/api'
 import { JobBar } from './JobBar'
 
 const callbacks = {
@@ -8,7 +8,7 @@ const callbacks = {
   onClear: vi.fn(),
 }
 
-function jobWithPhase(phase: string): DocumentJob {
+function jobWithPhase(phase: string): ContentJob {
   return {
     id: 'job_phase',
     status: 'running',
@@ -22,8 +22,8 @@ describe('JobBar progress phases', () => {
     expect(screen.getByText('2/5 修复文字')).toBeInTheDocument()
     expect(screen.queryByText('2/5 页面')).not.toBeInTheDocument()
 
-    rerender(<JobBar job={jobWithPhase('postprocess.diagram')} {...callbacks} />)
-    expect(screen.getByText('2/5 识别图表')).toBeInTheDocument()
+    rerender(<JobBar job={jobWithPhase('postprocess.visual_fusion')} {...callbacks} />)
+    expect(screen.getByText('2/5 融合视觉证据')).toBeInTheDocument()
     expect(screen.queryByText('2/5 页面')).not.toBeInTheDocument()
   })
 })

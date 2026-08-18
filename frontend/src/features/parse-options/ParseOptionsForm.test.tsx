@@ -7,7 +7,7 @@ describe('ParseOptionsForm advanced settings', () => {
   it('keeps execution strategy out of the workspace and uses one clear action', () => {
     render(
       <ParseOptionsForm
-        options={{ ...DEFAULT_OPTIONS, submissionKind: 'sync' }}
+        options={DEFAULT_OPTIONS}
         onChange={vi.fn()}
         onSubmit={vi.fn()}
         sourceReady

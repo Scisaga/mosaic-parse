@@ -1,14 +1,21 @@
-name: docling-glm-parser
+name: mosaicparse
 
 services:
-  parser:
+  mosaicparse:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ${PARSER_IMAGE:-ghcr.io/scisaga/docling-glm-parser:0.1.0}
-    container_name: docling_glm_parser
+    image: ${MOSAICPARSE_IMAGE:-ghcr.io/scisaga/mosaic-parse:0.3.0}
+    container_name: mosaicparse
     restart: unless-stopped
     init: true
+    depends_on:
+      glm-ocr:
+        condition: service_healthy
+        required: false
+      glm-ocr-sdk:
+        condition: service_healthy
+        required: false
     env_file:
       - path: .env
         required: false
@@ -18,7 +25,7 @@ services:
       PORT: ${PORT:-12303}
       HTTP_PROXY: ${HTTP_PROXY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
-      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1,glm-ocr,parser}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1,glm-ocr,glm-ocr-sdk,mosaicparse}
       DOCLING_DEVICE: cpu
       DOCLING_COMPILE_MODELS: ${DOCLING_COMPILE_MODELS:-0}
       DOCLING_LOCAL_ARTIFACTS_PATH: /models/docling
@@ -26,7 +33,7 @@ services:
     ports:
       - "${PORT:-12303}:${PORT:-12303}"
     volumes:
-      - parser-data:/data
+      - mosaicparse-data:/data
       - docling-models:/models/docling
       - huggingface-cache:/models/huggingface
     healthcheck:
@@ -38,7 +45,7 @@ services:
     stop_grace_period: 30s
 
   glm-ocr:
-    profiles: ["glm"]
+    profiles: ["glm", "glm-sdk"]
     image: ${GLM_VLLM_IMAGE:-vllm/vllm-openai:v0.19.1}
     container_name: docling_glm_ocr
     restart: unless-stopped
@@ -47,7 +54,7 @@ services:
       HF_TOKEN: ${HF_TOKEN:-}
       HTTP_PROXY: ${HTTP_PROXY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
-      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1,glm-ocr,parser}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1,glm-ocr,glm-ocr-sdk,mosaicparse}
     ports:
       - "${GLM_OCR_BIND_ADDRESS:-127.0.0.1}:${GLM_OCR_HOST_PORT:-8001}:8000"
     volumes:
@@ -85,7 +92,48 @@ services:
       retries: 10
     stop_grace_period: 1m
 
+  glm-ocr-sdk:
+    profiles: ["glm-sdk"]
+    build:
+      context: .
+      dockerfile: Dockerfile.glm-sdk
+      args:
+        PARSER_IMAGE: ${MOSAICPARSE_IMAGE:-ghcr.io/scisaga/mosaic-parse:0.3.0}
+    image: ${GLM_SDK_IMAGE:-docling-glm-ocr-sdk:0.1.5}
+    container_name: docling_glm_ocr_sdk
+    restart: unless-stopped
+    init: true
+    depends_on:
+      glm-ocr:
+        condition: service_healthy
+    environment:
+      HF_HOME: /models/huggingface
+      HF_TOKEN: ${HF_TOKEN:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1,glm-ocr,glm-ocr-sdk,mosaicparse}
+      GLMOCR_MODE: selfhosted
+      GLMOCR_OCR_API_URL: http://glm-ocr:8000/v1/chat/completions
+      GLMOCR_OCR_MODEL: zai-org/GLM-OCR
+      GLMOCR_LAYOUT_DEVICE: cpu
+    volumes:
+      - huggingface-cache:/models/huggingface
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5002/health', timeout=5)"
+      interval: 30s
+      timeout: 5s
+      start_period: 10m
+      retries: 10
+    stop_grace_period: 1m
+
 volumes:
-  parser-data:
+  mosaicparse-data:
+    name: mosaicparse-data
   docling-models:
+    name: mosaicparse-docling-models
   huggingface-cache:
+    name: mosaicparse-huggingface-cache

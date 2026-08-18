@@ -20,7 +20,7 @@ export function formatDuration(ms?: number | null): string {
   return `${minutes}m ${seconds}s`
 }
 
-export function safeFilename(name: string | undefined, extension: 'md' | 'txt'): string {
+export function safeFilename(name: string | undefined, extension: 'json' | 'md' | 'txt'): string {
   const base = (name || 'document')
     .replace(/\.[^.]+$/, '')
     .replace(/[^\p{L}\p{N}._-]+/gu, '-')

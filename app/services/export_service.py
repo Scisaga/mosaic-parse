@@ -7,6 +7,7 @@ import re
 from collections.abc import Sequence
 
 from app.models.parse_result import PageParseResult
+from app.services.table_service import TableFragment, assemble_logical_tables
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _LINK_RE = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
@@ -38,7 +39,9 @@ class ExportService:
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
 
-    def join_pages(self, pages: Sequence[PageParseResult], *, preserve_page_breaks: bool) -> tuple[str, str]:
+    def join_pages(
+        self, pages: Sequence[PageParseResult], *, preserve_page_breaks: bool
+    ) -> tuple[str, str]:
         markdown_parts: list[str] = []
         text_parts: list[str] = []
         for page in pages:
@@ -52,3 +55,28 @@ class ExportService:
                 text_parts.append(plain)
         separator = "\n\n\f\n\n" if preserve_page_breaks else "\n\n"
         return separator.join(markdown_parts).strip(), separator.join(text_parts).strip()
+
+    def join_document(
+        self,
+        pages: Sequence[PageParseResult],
+        *,
+        preserve_page_breaks: bool,
+        table_fragments: list[object] | None = None,
+        merge_cross_page_tables: bool = True,
+    ) -> tuple[str, str]:
+        fragments = [item for item in table_fragments or [] if isinstance(item, TableFragment)]
+        content_by_page = assemble_logical_tables(
+            list(pages),
+            fragments,
+            enabled=merge_cross_page_tables,
+        )
+        canonical = [
+            page.model_copy(
+                update={
+                    "content": content_by_page.get(page.page_number, page.content or ""),
+                    "plain_text": None,
+                }
+            )
+            for page in pages
+        ]
+        return self.join_pages(canonical, preserve_page_breaks=preserve_page_breaks)

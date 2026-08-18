@@ -1,10 +1,20 @@
 import styles from './index.css?raw'
 
 describe('desktop control deck layout contract', () => {
-  it('keeps both cards at the same compact desktop height and restores natural mobile flow', () => {
-    expect(styles).toContain('--control-card-height: 140px')
-    expect(styles).toContain('.source-picker, .options-panel { height: var(--control-card-height); }')
-    expect(styles).toContain('.control-deck { --control-card-height: 140px; flex: none; align-items: stretch; }')
+  it('keeps cards aligned without clipping content and restores natural mobile flow', () => {
+    expect(styles).toContain('--control-card-min-height: 140px')
+    expect(styles).toContain('.source-picker, .options-panel { min-height: var(--control-card-min-height); }')
+    expect(styles).not.toContain('.source-picker, .options-panel { height: var(--control-card-height); }')
+    expect(styles).toContain('.control-deck { --control-card-min-height: 140px; flex: none; align-items: stretch; }')
     expect(styles).toContain('.control-deck { grid-template-columns: 1fr; align-items: start; }')
+  })
+})
+
+describe('result rendering contract', () => {
+  it('uses CJK-safe UI and data fonts with a lightweight evidence overview', () => {
+    expect(styles).toContain('--font-ui: "Noto Sans CJK SC"')
+    expect(styles).toContain('--font-data: "Noto Sans Mono CJK SC"')
+    expect(styles).toContain('font-family: var(--font-ui)')
+    expect(styles).toContain('.evidence-overview')
   })
 })

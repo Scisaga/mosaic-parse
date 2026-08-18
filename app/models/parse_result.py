@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+
+from app.models.document_ir import ContentEvidenceIR
 
 
 def utc_now() -> datetime:
@@ -22,6 +25,70 @@ class PageStatus(StrEnum):
     COMPLETED = "completed"
     WARNING = "warning"
     FAILED = "failed"
+
+
+class PageSourceKind(StrEnum):
+    NATIVE = "native"
+    SCANNED = "scanned"
+    MIXED = "mixed"
+    SPARSE = "sparse"
+
+
+class QualityVerdict(StrEnum):
+    TRUSTED = "trusted"
+    DEGRADED = "degraded"
+    UNTRUSTED = "untrusted"
+
+
+class SelectionStrategy(StrEnum):
+    DOCLING = "docling"
+    NATIVE_REPAIR = "native_repair"
+    QWEN_VISUAL_FUSION = "qwen_visual_fusion"
+
+
+class VisualFusionDiagnostics(BaseModel):
+    """Measured visual-fusion activity without document or reasoning content."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    qwen_calls: int | None = Field(default=None, ge=0)
+    qwen_duration_ms: int | None = Field(default=None, ge=0)
+    visual_regions: int | None = Field(default=None, ge=0)
+    table_count: int | None = Field(default=None, ge=0)
+    extracted_cells: int | None = Field(default=None, ge=0)
+    agreed_cells: int | None = Field(default=None, ge=0)
+    qwen_selected_fields: int | None = Field(default=None, ge=0)
+    qwen_resolved_conflicts: int | None = Field(default=None, ge=0)
+    unresolved_conflicts: int | None = Field(default=None, ge=0)
+    truncated_calls: int | None = Field(default=None, ge=0)
+    partitions: int | None = Field(default=None, ge=0)
+
+
+class PageDiagnostics(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_kind: PageSourceKind
+    quality_verdict: QualityVerdict = QualityVerdict.TRUSTED
+    selected_strategy: SelectionStrategy = SelectionStrategy.DOCLING
+    native_text_characters: int | None = Field(default=None, ge=0)
+    visual_ink_ratio: float | None = Field(default=None, ge=0, le=1)
+    image_coverage_ratio: float | None = Field(default=None, ge=0, le=1)
+    detected_rotation_degrees: Literal[0, 90, 180, 270] | None = None
+    logical_table_ids: list[str] = Field(default_factory=list)
+    visual_fusion: VisualFusionDiagnostics | None = None
+
+
+class QualitySummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    trusted_pages: int = Field(default=0, ge=0)
+    degraded_pages: int = Field(default=0, ge=0)
+    untrusted_pages: int = Field(default=0, ge=0)
+    repaired_pages: int = Field(default=0, ge=0)
+    visual_pages: int = Field(default=0, ge=0)
+    qwen_calls: int = Field(default=0, ge=0)
+    qwen_resolved_conflicts: int = Field(default=0, ge=0)
+    unresolved_visual_conflicts: int = Field(default=0, ge=0)
 
 
 class ParseWarning(BaseModel):
@@ -45,12 +112,12 @@ class PageParseResult(BaseModel):
     plain_text: str | None = None
     duration_ms: int = Field(default=0, ge=0)
     warnings: list[ParseWarning] = Field(default_factory=list)
+    diagnostics: PageDiagnostics | None = None
 
 
 class ParsePipeline(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    mode: str
     profile: str
     primary: str
     ocr: str | None = None
@@ -96,13 +163,14 @@ class DocumentParseResult(BaseModel):
     pipeline: ParsePipeline
     route_summary: RouteSummary = Field(default_factory=RouteSummary)
     warnings: list[ParseWarning] = Field(default_factory=list)
+    quality_summary: QualitySummary | None = None
     usage: ParseUsage = Field(default_factory=ParseUsage)
     created_at: datetime = Field(default_factory=utc_now)
+    evidence_ir: ContentEvidenceIR | None = None
 
     # Adapter-private, request-scoped enrichment hints.  These never cross the
     # stable API/storage boundary and deliberately stay out of the JSON schema.
     _picture_candidates: list[object] = PrivateAttr(default_factory=list)
     _vlm_page_numbers: set[int] = PrivateAttr(default_factory=set)
-
-    def content_for(self, output_format: str) -> str:
-        return self.plain_text if str(output_format) == "text" else self.markdown
+    _table_fragments: list[object] = PrivateAttr(default_factory=list)
+    _visual_page_irs: dict[int, object] = PrivateAttr(default_factory=dict)

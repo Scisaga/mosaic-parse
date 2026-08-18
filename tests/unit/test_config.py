@@ -39,11 +39,16 @@ def test_docling_device_rejects_invalid_index() -> None:
 def test_sync_limits_cannot_exceed_global_limits() -> None:
     with pytest.raises(ValidationError, match="SYNC_MAX_BYTES"):
         make_settings(max_upload_bytes=100, sync_max_bytes=101)
-    with pytest.raises(ValidationError, match="SYNC_MAX_PAGES"):
-        make_settings(max_document_pages=2, sync_max_pages=3)
+    with pytest.raises(ValidationError, match="SYNC_MAX_UNITS"):
+        make_settings(max_content_units=2, sync_max_units=3)
 
 
 def test_mcp_host_allowlist_adds_port_patterns() -> None:
     settings = make_settings(mcp_allowed_hosts="localhost,parser:12303")
     assert settings.mcp_allowed_host_list == ["localhost", "localhost:*", "parser:12303"]
 
+
+def test_media_descriptions_disable_reasoning_by_default() -> None:
+    settings = make_settings()
+    assert settings.media_vlm_reasoning_effort == "none"
+    assert settings.video_summary_reasoning_effort == "none"

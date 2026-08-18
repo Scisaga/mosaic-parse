@@ -1,39 +1,38 @@
 <p align="center">
-  <img src="logo.png" alt="Docling GLM logo" width="112" />
+  <img src="logo.png" alt="MosaicParse logo" width="112" />
 </p>
 
-# Docling GLM
+# MosaicParse
 
-自托管的文档转 Markdown / Plain Text 微服务。
+供外部 RAG 系统调用的自托管多模态内容证据解析微服务。
 
-Docling GLM 使用 Docling 解析数字原生 PDF，并可通过远程 GLM-OCR
-识别扫描页和图片区域；对于特殊复杂版式，可选接入兼容 OpenAI API 的
-Ollama Vision 模型。项目提供 FastAPI、React Web UI、同步/异步任务、
-SSE、MCP、Docker Compose 和 GHCR 镜像。
+MosaicParse 解析 PDF、DOCX、PPTX、常见图片与独立视频。图片会按实测布局/OCR
+信号路由至文档解析或 VLM 描述；视频通过 FFmpeg 采样关键帧，并明确限制摘要只基于
+采样内容。文档内嵌图片作为可下载资产返回，文档内嵌视频则完全忽略。主产物是版本化
+`ContentEvidenceIR`，Markdown / Plain Text 是方便 RAG 消费的派生视图。
 
-> Docling GLM is an independent community project and is not affiliated with
+> MosaicParse is an independent community project and is not affiliated with
 > or endorsed by the Docling or GLM-OCR projects. Docling 与 GLM-OCR 名称及
 > 商标归各自权利人所有。
 
 ## 界面预览
 
-![Docling GLM Web UI：原始 PDF 与 Markdown 表格解析结果并排预览](docs/assets/web-ui.png)
+![MosaicParse Web UI：原始 PDF 与 Markdown 表格解析结果并排预览](docs/assets/web-ui.png)
 
 截图使用仓库内自制的 `tests/fixtures/table-report.pdf`，不包含第三方文档内容。
 
 ## 项目边界
 
-本项目只把 PDF/图片解析为 Markdown 或纯文本。它不实现财务指标抽取、
-实体/关系/事件抽取、报告总结、RAG 切片、Embedding、向量数据库、文档
-问答、知识图谱、模型训练或长期文档资产管理。上述能力应作为下游项目
-消费本服务的文本结果，不能反向侵入解析层。
+本项目只负责“内容中可见了什么、位于哪里、结构如何、证据来自哪个解析器”。
+它不负责 Embedding、切块策略、索引、问答、实体关系或领域结论。
 
 ## 功能
 
-- PDF、PNG、JPEG、WEBP、TIFF 上传和受控 HTTP/HTTPS URL；
-- `auto`、`standard`、`ocr`、可选 `vlm` 模式；
-- `fast`、`balanced`、`accurate` 质量配置；
-- Markdown / Plain Text，支持页码范围与结果下载；
+- PDF、DOCX、PPTX、PNG、JPEG、WebP、TIFF、BMP 及 MP4、MOV、MKV、WebM、AVI；
+- 文档内嵌图片提取、去重、描述与下载；独立视频关键帧和仅基于采样帧的摘要；
+- `fast`、`balanced`、`accurate` 三个质量档位，服务自动路由；
+- 版本化证据 IR，包含区域、表格、单元格 span、来源与质量原因；
+- 可选 Markdown / Plain Text 派生视图，支持页码范围与结果下载；
 - 小文件同步解析，异步 Job、持久化状态和 SSE 进度；
 - `/health`、`/ready`、后端能力探测、Swagger、ReDoc；
 - MCP 2.x Streamable HTTP；
@@ -46,7 +45,7 @@ SSE、MCP、Docker Compose 和 GHCR 镜像。
 
 ```bash
 cp .env.example .env
-docker compose up -d --build parser
+docker compose up -d --build mosaicparse
 docker compose ps
 ```
 
@@ -59,7 +58,7 @@ docker compose ps
 - MCP: <http://localhost:12303/mcp>
 
 首次转换会下载 Docling 布局/表格模型，`/ready` 在初始化期间可能暂时返回
-非 2xx。parser 健康检查为首次下载/初始化保留 10 分钟 `start_period`。
+非 2xx。MosaicParse 健康检查为首次下载/初始化保留 10 分钟 `start_period`。
 模型保存在 Compose 命名卷中，重启不会重复下载。
 
 容器使用 `DOCLING_LOCAL_ARTIFACTS_PATH` 作为本服务的离线目录配置。不要在
@@ -69,21 +68,21 @@ docker compose ps
 同步解析一个自制测试 PDF：
 
 ```bash
-curl --fail-with-body http://localhost:12303/v1/documents/parse \
+curl --fail-with-body http://localhost:12303/v1/content/parse \
   -F file=@tests/fixtures/native-report.pdf \
-  -F mode=standard \
   -F profile=balanced \
-  -F output_format=markdown \
-  -F language=zh,en
+  -F language=zh,en \
+  -F include_renderings=true
 ```
 
 ## 三种部署模式
 
 | 模式 | 主服务 | OCR/VLM | 启动方式 |
 |---|---|---|---|
-| CPU-only | 本项目 CPU 镜像 | 关闭；适合数字 PDF | `docker compose up -d --build parser` |
-| 本机 GLM | CPU parser | profile 中独立 vLLM，默认 GPU 1 | `docker compose --profile glm up -d --build` |
-| 远程后端 | CPU parser | 远程 GLM 和/或既有 Ollama | 配置 URL 后只启动 `parser` |
+| CPU-only | 本项目 CPU 镜像 | 关闭；适合数字 PDF/Office | `docker compose up -d --build mosaicparse` |
+| 本机 GLM | CPU 主服务 | profile 中独立 vLLM，默认 GPU 1 | `docker compose --profile glm up -d --build` |
+| 完整 GLM SDK | CPU 主服务 + CPU 布局 sidecar | 复用 GPU 1 的 GLM-OCR | `docker compose --profile glm-sdk up -d --build` |
+| 远程后端 | CPU 主服务 | 远程 GLM 和/或既有 VLM | 配置 URL 后只启动 `mosaicparse` |
 
 ### 本机 GLM-OCR（GPU 1）
 
@@ -108,6 +107,30 @@ Compose 将 GPU `device_ids` 默认锁到 `1`。参考主机的 GPU 1 是 RTX 20
 （Turing，不支持 BF16），因此 vLLM 默认使用 FP16 `--dtype half`。主 parser
 仍不挂载 GPU，也不包含 CUDA 依赖。
 
+### GLM SDK＋Qwen 区域视觉融合
+
+`docling-glm-ocr` 插件和官方 `glmocr` SDK 复用同一个 GLM-OCR 识别模型。SDK
+sidecar 在 CPU 上运行 PP-DocLayoutV3，将布局、区域和 OCR 原值作为视觉证据；Qwen
+负责区域语义、表格拓扑、行列归属、可见值读取和冲突裁决。结果按区域和单元格组装，
+不会用 table-only 候选覆盖整页正文、图片占位或跨页表元数据。
+
+```dotenv
+GLM_SDK_ENABLED=1
+VISUAL_ROUTER_ENABLED=1
+VLM_ENABLED=1
+VLM_MODEL=qwen3.6-docparse:35b-32k
+```
+
+```bash
+docker compose --profile glm-sdk up -d --build
+curl --fail http://localhost:12303/v1/backends
+```
+
+`accurate` 自动对测得的复杂扫描/混合表、横置表及签章页执行视觉融合；原生和
+稀疏页继续由 Docling 处理。每页最多 3 次 Qwen 调用、累计最多 180 秒；区域读取
+最多 16K 输出 token。`fast/balanced` 不调用 Qwen，`VISUAL_ROUTER_ENABLED=0`
+可整体停用视觉路由。请求端不再暴露后端模式或 VLM policy。
+
 ### 远程 GLM / Ollama
 
 ```dotenv
@@ -117,18 +140,17 @@ GLM_OCR_MODEL=zai-org/GLM-OCR
 
 VLM_ENABLED=1
 VLM_BASE_URL=http://ollama-host:11434/v1
-VLM_MODEL=qwen3.6:35b
-VLM_DIAGRAM_ENRICHMENT_ENABLED=1
+VLM_MODEL=qwen3.6-docparse:35b-32k
+VLM_PAGE_BUDGET_SECONDS=180
+VLM_MAX_CALLS_PER_PAGE=3
+VLM_REGION_MAX_TOKENS=16384
 ```
 
-`auto` 会优先用 GLM 全页 OCR 修复可明确识别的异常 PDF 字符映射；检测到带
-“流程图 / flowchart / diagram”等窄范围图注的 PictureItem 时，可把原图裁剪
-交给 VLM 生成经严格校验的 Mermaid，并在保留 `<!-- image -->` 占位的同时紧邻
-插入代码块。该 Mermaid 是模型推断结果，可能误判节点或连线，使用前必须人工
-对照原文复核；可用 `VLM_DIAGRAM_ENRICHMENT_ENABLED=0` 独立关闭出站调用与成本。
+`VLM_ENABLED=0` 始终禁止所有 Qwen 出站调用。视觉诊断仅记录调用数、耗时、
+区域/表格/单元格和冲突计数，不记录图像、正文、prompt 或 reasoning 正文。
 
 ```bash
-docker compose up -d --build parser
+docker compose up -d --build mosaicparse
 curl --fail http://localhost:12303/v1/backends
 ```
 
@@ -139,13 +161,17 @@ curl --fail http://localhost:12303/v1/backends
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| `POST` | `/v1/documents/parse` | 小文档同步解析 |
-| `POST` | `/v1/documents/jobs` | 创建异步任务 |
-| `GET` | `/v1/documents/jobs/{job_id}` | 查询持久化状态 |
-| `GET` | `/v1/documents/jobs/{job_id}/events` | SSE 进度 |
-| `GET` | `/v1/documents/jobs/{job_id}/result` | 获取/下载 Markdown 或 Text |
-| `POST` | `/v1/documents/jobs/{job_id}/retry` | 重试失败任务 |
-| `DELETE` | `/v1/documents/jobs/{job_id}` | 取消或删除任务 |
+| `POST` | `/v1/content/parse` | 小内容同步并持久化；视频/大输入自动返回 202 |
+| `POST` | `/v1/content/jobs` | 创建异步任务 |
+| `GET` | `/v1/content/jobs/{job_id}` | 查询持久化状态 |
+| `GET` | `/v1/content/jobs/{job_id}/events` | SSE 进度 |
+| `GET` | `/v1/content/jobs/{job_id}/result` | 获取/下载 ContentEvidenceIR JSON |
+| `GET` | `/v1/content/jobs/{job_id}/rendering/{format}` | 获取派生 Markdown 或 Text |
+| `GET` | `/v1/content/jobs/{job_id}/assets` | 列出图片、视频与关键帧资产 |
+| `GET` | `/v1/content/jobs/{job_id}/assets/{asset_id}` | 鉴权下载资产；视频支持 Range |
+| `GET` | `/v1/content/jobs/{job_id}/bundle` | 按需生成 manifest 与资产 ZIP |
+| `POST` | `/v1/content/jobs/{job_id}/retry` | 重试失败任务 |
+| `DELETE` | `/v1/content/jobs/{job_id}` | 取消或删除任务 |
 | `GET` | `/v1/backends` | 后端真实能力状态 |
 | `GET` | `/health`, `/ready` | 存活与就绪检查 |
 | `GET/POST` | `/mcp` | MCP Streamable HTTP |
@@ -170,15 +196,14 @@ X-Admin-Token: <ADMIN_TOKEN>
 
 ## MCP
 
-MCP 使用 Python SDK 2.x 的 Streamable HTTP 传输，暴露解析、创建任务、查询
-任务和获取结果工具。大文件使用受控 `source_url`；MCP 不接受任意本地文件
-路径。
+MCP 使用 Python SDK 2.x 的 Streamable HTTP 传输，暴露解析、任务状态、证据 IR
+和派生渲染工具。大文件使用受控 `source_url`；MCP 不接受任意本地文件路径。
 
 MCP v2 会校验 Host 和 Origin 防止 DNS rebinding。通过公网域名/反向代理
 暴露时，必须把精确 `host[:port]` 和 Origin 添加到：
 
 ```dotenv
-MCP_ALLOWED_HOSTS=localhost,127.0.0.1,[::1],parser,docling_glm_parser,docs.example.com
+MCP_ALLOWED_HOSTS=localhost,127.0.0.1,[::1],mosaicparse,docs.example.com
 MCP_ALLOWED_ORIGINS=http://localhost,http://127.0.0.1,https://docs.example.com
 ```
 
@@ -232,7 +257,7 @@ npm --prefix frontend run test
 npm --prefix frontend run build
 
 docker compose config --quiet
-docker build -t docling-glm-parser:local .
+docker build -t mosaic-parse:local .
 ```
 
 CI 不下载或运行大模型；GLM/Ollama 错误路径由 mock 服务覆盖。真实 GPU
@@ -245,7 +270,7 @@ CI 不下载或运行大模型；GLM/Ollama 错误路径由 mock 服务覆盖。
 - [API](docs/api.md)
 - [部署](docs/deployment.md)
 - [基准测试](docs/benchmark.md)
-- [项目 v0.1 设计规格](docs/project-spec.md)
+- [项目 0.3.0 设计规格](docs/project-spec.md)
 
 本项目代码使用 [Apache License 2.0](LICENSE)。Docling、GLM-OCR、模型权重
 和容器镜像拥有各自许可证；部署者需要分别核查并遵守其版本对应条款。

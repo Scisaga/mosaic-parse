@@ -27,10 +27,11 @@ so an ambient proxy cannot bypass their SSRF/backend routing controls.
 
 ## Mode 1: CPU parser only
 
-This is the default and works for digital-native PDFs without GLM:
+This is the default and works for digital-native PDF/Office content without GLM.
+Purely visual images and standalone videos still require an enabled VLM:
 
 ```bash
-docker compose up -d --build parser
+docker compose up -d --build mosaicparse
 docker compose ps
 curl --fail http://127.0.0.1:12303/health
 curl --fail http://127.0.0.1:12303/ready
@@ -47,6 +48,12 @@ The service uses `DOCLING_LOCAL_ARTIFACTS_PATH=/models/docling` so its setting
 does not collide with Docling's own `DOCLING_ARTIFACTS_PATH` environment
 variable. Do not set the upstream variable to a fresh empty volume: upstream
 interprets it as an offline artifact directory and disables automatic download.
+
+The main image includes FFmpeg and FFprobe. Standalone video defaults are 200 MiB,
+30 minutes, at most 24 keyframes, 7680×4320 source frames, two FFmpeg threads and
+one concurrent FFmpeg process. Tune `VIDEO_MAX_FRAME_PIXELS`, `FFMPEG_THREADS`,
+`FFMPEG_MAX_CONCURRENCY`, and `FFMPEG_TIMEOUT_SECONDS` only with matching container
+CPU/memory limits and workload tests.
 
 For offline hosts, prefetch on a connected machine and transfer the artifacts:
 
@@ -111,7 +118,32 @@ contract; arbitrary prose prompts can silently omit otherwise visible text.
 Model-server startup includes a potentially large Hugging Face download and has
 a five-minute health-check grace period.
 
-## Mode 3: Remote GLM and/or existing Ollama
+## Mode 3: Bundled official GLM-OCR SDK page pipeline
+
+The `glm-sdk` profile starts the same GPU model service plus a CPU-only SDK
+sidecar for PP-DocLayoutV3 and region orchestration:
+
+```dotenv
+GLM_OCR_ENABLED=1
+GLM_SDK_ENABLED=1
+VISUAL_ROUTER_ENABLED=1
+VLM_ENABLED=1
+VLM_MODEL=qwen3.6-docparse:35b-32k
+```
+
+```bash
+docker compose --profile glm-sdk up -d --build
+docker compose --profile glm-sdk ps
+docker compose logs -f glm-ocr-sdk
+```
+
+`profile=accurate` sends measured complex visual regions to the SDK and
+Qwen. Healthy native and sparse pages stay on Docling. The SDK sidecar is
+configured with `layout.device=cpu`, `batch_size=1`, and `max_workers=1`; it
+reuses `http://glm-ocr:8000` and must not receive a GPU device reservation.
+Set `VISUAL_ROUTER_ENABLED=0` for an immediate automatic-route rollback.
+
+## Mode 4: Remote GLM and/or existing Ollama
 
 Do not enable the bundled profile. Point the parser at services reachable from
 its container:
@@ -123,12 +155,42 @@ GLM_OCR_MODEL=zai-org/GLM-OCR
 
 VLM_ENABLED=1
 VLM_BASE_URL=http://ollama-host.example:11434/v1
-VLM_MODEL=qwen3.6:35b
+VLM_MODEL=qwen3.6-docparse:35b-32k
 VLM_MAX_RETRIES=1
+VLM_MAX_CONCURRENCY=1
+VLM_PAGE_BUDGET_SECONDS=180
+VLM_MAX_CALLS_PER_PAGE=3
+VLM_PLAN_MAX_TOKENS=4096
+VLM_REGION_MAX_TOKENS=16384
+VLM_CONFLICT_MAX_TOKENS=8192
+VLM_REASONING_EFFORT=low
+VLM_CONFLICT_REASONING_EFFORT=medium
+MEDIA_VLM_REASONING_EFFORT=none
+VIDEO_SUMMARY_REASONING_EFFORT=none
+```
+
+图片与视频描述默认关闭 reasoning，避免简单结构化描述消耗完整输出预算；文档视觉融合仍使用独立的 reasoning 配置。
+
+Create the fixed 32K Ollama alias on the model host before starting the parser:
+
+```dockerfile
+FROM qwen3.6:35b
+PARAMETER num_ctx 32768
 ```
 
 ```bash
-docker compose up -d --build parser
+ollama create qwen3.6-docparse:35b-32k -f Modelfile
+curl --fail http://ollama-host.example:11434/api/ps
+```
+
+The OpenAI-compatible request cannot change the loaded context length per call;
+the alias therefore owns `num_ctx`. Structured visual responses use JSON Schema
+through `response_format` and are validated again by Pydantic in the parser.
+See [Ollama OpenAI compatibility](https://docs.ollama.com/api/openai-compatibility)
+and [Structured Outputs](https://docs.ollama.com/capabilities/structured-outputs).
+
+```bash
+docker compose up -d --build mosaicparse
 curl --fail http://127.0.0.1:12303/v1/backends
 ```
 
@@ -151,8 +213,8 @@ wheels; it does not install CUDA libraries into the parser environment.
 
 ## Data, upgrades, and cleanup
 
-Compose uses named volumes `parser-data`, `docling-models`, and
-`huggingface-cache`. Back up `parser-data` before upgrades. Do not use
+Compose uses named volumes `mosaicparse-data`, `docling-models`, and
+`huggingface-cache`. Back up `mosaicparse-data` before upgrades. Do not use
 `docker compose down -v` unless deleting jobs, results, and model caches is
 intentional.
 
@@ -169,12 +231,12 @@ usable. `/v1/backends` reports individual backend capability.
 ## MCP reverse-proxy allowlist
 
 MCP 2.x validates the request Host and browser Origin to mitigate DNS rebinding.
-Defaults allow only localhost and Compose-internal parser names. When exposing
+Defaults allow only localhost and the Compose-internal MosaicParse name. When exposing
 `/mcp` through a domain, add its exact `host[:port]` to `MCP_ALLOWED_HOSTS` and
 the exact scheme/host/port Origin to `MCP_ALLOWED_ORIGINS`, for example:
 
 ```dotenv
-MCP_ALLOWED_HOSTS=localhost,127.0.0.1,[::1],parser,docling_glm_parser,docs.example.com
+MCP_ALLOWED_HOSTS=localhost,127.0.0.1,[::1],mosaicparse,docs.example.com
 MCP_ALLOWED_ORIGINS=http://localhost,http://127.0.0.1,https://docs.example.com
 ```
 

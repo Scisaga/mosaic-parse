@@ -19,12 +19,11 @@ function renderApp() {
 describe('App workspace submission', () => {
   beforeEach(() => {
     localStorage.clear()
-    localStorage.setItem('docling-glm.parse-options.v1', JSON.stringify({ submissionKind: 'sync' }))
   })
 
   afterEach(() => vi.restoreAllMocks())
 
-  it('migrates legacy sync state and always submits through the jobs endpoint', async () => {
+  it('always submits through the jobs endpoint', async () => {
     const requested: string[] = []
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = String(input)
@@ -32,7 +31,7 @@ describe('App workspace submission', () => {
       if (url.endsWith('/health')) return new Response(JSON.stringify({ status: 'ok' }), { headers: { 'Content-Type': 'application/json' } })
       if (url.endsWith('/ready')) return new Response(JSON.stringify({ status: 'ready', ready: true }), { headers: { 'Content-Type': 'application/json' } })
       if (url.endsWith('/v1/backends')) return new Response(JSON.stringify({ backends: [], queue: { active: 0, capacity: 8 } }), { headers: { 'Content-Type': 'application/json' } })
-      if (url.endsWith('/v1/documents/jobs') && init?.method === 'POST') {
+      if (url.endsWith('/v1/content/jobs') && init?.method === 'POST') {
         return new Response(JSON.stringify({
           id: 'job_async_only',
           status: 'completed',
@@ -40,7 +39,7 @@ describe('App workspace submission', () => {
           progress: { current: 1, total: 1 },
         }), { status: 202, headers: { 'Content-Type': 'application/json' } })
       }
-      if (url.includes('/v1/documents/jobs/job_async_only/result')) {
+      if (url.includes('/v1/content/jobs/job_async_only/result')) {
         return new Response('', { headers: { 'Content-Type': url.includes('format=markdown') ? 'text/markdown' : 'text/plain' } })
       }
       throw new Error(`Unexpected request: ${url}`)
@@ -53,8 +52,7 @@ describe('App workspace submission', () => {
     await user.click(screen.getByRole('button', { name: '开始解析' }))
 
     expect(await screen.findByText('任务 job_async_only 已创建')).toBeInTheDocument()
-    expect(requested).toContain('POST /v1/documents/jobs')
-    expect(requested.some((request) => request.includes('/v1/documents/parse'))).toBe(false)
-    expect(JSON.parse(localStorage.getItem('docling-glm.parse-options.v1') ?? '{}')).toMatchObject({ submissionKind: 'async' })
+    expect(requested).toContain('POST /v1/content/jobs')
+    expect(requested.some((request) => request.includes('/v1/content/parse'))).toBe(false)
   })
 })

@@ -1,93 +1,129 @@
 # Architecture
 
-Docling GLM separates document orchestration from model serving. The FastAPI
-parser remains a CPU service; GLM-OCR and Ollama are optional HTTP backends.
+MosaicParse 是多模态内容证据层，不是业务信息抽取层。FastAPI 服务保持 CPU-only；
+GLM-OCR 和 Qwen 是可选远程模型后端。
 
 ```text
-Browser / HTTP client / MCP client
-                 |
-                 v
-FastAPI: auth, validation, jobs, SSE, UI, MCP
-                 |
-                 v
-Parser service: routing, timeout, normalization, quality warnings
-        |                                  |
-        v                                  v
-Docling Standard (CPU)          optional Ollama VLM (remote)
-        |
-        v
-optional docling-glm-ocr adapter (OpenAI-compatible HTTP)
-        |
-        v
-GLM-OCR vLLM service (GPU, separate container or host)
+Browser / HTTP / MCP
+          |
+          v
+Source validation + jobs + timeout
+          |
+          v
+Real-format router (magic / OOXML / FFprobe)
+          |
+          +--> PDF/image document -----> Docling + deterministic repair
+          |
+          +--> visual/mixed image ------> measured routing + VLM description
+          |
+          +--> DOCX/PPTX --------------> Docling + image-only OOXML relations
+          |
+          +--> standalone video --------> bounded FFmpeg keyframes + VLM
+                                      |
+                                      v
+                        unit/region/table/asset evidence
+                                      |
+                                      v
+                     ContentEvidenceIR v1 (primary)
+                           |                    |
+                           v                    v
+                  Markdown renderer      plain-text renderer
+                           |
+                           v
+                  EventRail / other domain systems
+                  entity + relation + event extraction
 ```
 
-## Responsibilities
+## 边界
 
-- `app/api`: versioned HTTP routes, health/readiness, administration.
-- `app/models`: public and internal Pydantic contracts; Docling objects never
-  escape through these contracts.
-- `app/parsers`: adapters for Docling Standard, remote GLM OCR, and optional VLM.
-- `app/services`: source acquisition, parsing, jobs, quality checks, export, and
-  cleanup.
-- `app/repositories`: durable SQLite job state.
-- `app/security`: authentication, upload validation, and SSRF protection.
-- `app/mcp`: MCP 2.x Streamable HTTP surface mounted below `/mcp`.
-- `frontend`: independent React application built by Vite and served as static
-  files by FastAPI in production.
+本项目负责：
 
-## Runtime lifecycle
+- 内容格式、页面/幻灯片/图片分类、旋转、区域和阅读顺序；
+- 原生文字、OCR 与视觉读取的来源记录；
+- 表格拓扑、单元格、span、bbox 与跨页逻辑表；
+- 签章、印章、手写、图片资产与正文的分离；
+- 独立视频的实测元数据、场景候选、关键帧与采样限定摘要；
+- 结构质量、未解决冲突和运行测量；
+- 从 IR 派生 Markdown / Plain Text。
 
-At startup the service validates settings, opens the SQLite repository, marks
-jobs left in `running` state as `failed/server_restarted`, creates the bounded
-job queue, and initializes parser workers. A worker owns and reuses its
-`DocumentConverter`; requests do not construct converters.
+本项目不负责：
 
-Docling conversion is synchronous CPU work and runs outside the FastAPI event
-loop. The default is one parser worker because upstream converter objects are
-not assumed to be thread-safe. External backend calls have independent timeout,
-retry, and concurrency limits.
+- 公司、人物、产品或指标的规范化与消歧；
+- `ReportedFact`、实体、关系、事件或产业图谱；
+- 事件时间、参与者和数值角色的领域解释；
+- Embedding、切块、索引、问答、领域总结和长期资产管理。
 
-## Persistent state
+EventRail 应保存 `content_id/unit_id/region_id/table_id/cell_id/asset_id` 作为证据引用，
+并独立演进领域 ontology。解析器升级不会直接改写 ER 的事件定义。
+
+## 唯一公共路由
+
+请求不再选择 `standard/ocr/vlm` 后端。`profile` 是唯一质量控制：
+
+- `fast/balanced`：自动 Docling/GLM 路径，不出站调用 Qwen；
+- `accurate`：只把测得的复杂扫描/混合表、横置表和签章页送入视觉融合。
+
+运行时只保留 `VISUAL_ROUTER_ENABLED=0` 和 `VLM_ENABLED=0` 等部署级停用开关。
+不存在整页 Qwen Markdown 替换，也不存在旧 fallback/diagram 分支。
+
+## 视觉融合
+
+GLM SDK 提供布局区域、HTML 表格和 OCR 原值；Docling 提供原生文本、表格与坐标；
+Qwen 负责区域语义、方向、表格拓扑、行列归属、可见值读取和冲突裁决。表格按
+区域和单元格装配，不能覆盖同页正文、图片或跨页来源。
+
+单页最多 3 次 Qwen 请求、总预算 180 秒。区域读取最多 16K 输出 token，模型别名
+使用 32K context。结构化响应经 JSON Schema 和 Pydantic 双重校验。reasoning 仅
+用于模型内部推理与长度测量，不进入 IR、API 或日志。
+
+## ContentEvidenceIR
+
+稳定契约位于 `app/models/document_ir.py`，版本为 `content-evidence/1.0`。核心关系：
+
+```text
+document
+source
+  units[]
+    regions[]  -> block_ids[] / table_ids[]
+    blocks[]   -> bbox + reading_order + evidence
+  tables[]
+    cells[]    -> row/column/span/bbox/text/evidence
+  logical_tables[] -> fragment_table_ids[] + source_units[]
+  assets[]          -> SHA256 + locations[] + visual_analysis
+  video_analysis    -> scenes[] + keyframes[]
+  renderings        -> derived Markdown / plain text
+  diagnostics       -> measured quality counts
+  runtime           -> backend and latency measurements
+```
+
+未知坐标或测量保持 `null`，不能伪造为零。原始媒体通过鉴权资产接口返回；prompt、
+reasoning 和未采用候选正文不进入公共 IR 或日志。
+
+## 持久化
 
 ```text
 /data
 ├── jobs.db
 └── jobs/<job_id>
     ├── input/original.<ext>
-    ├── output/result.md
-    ├── output/result.txt
-    ├── output/metadata.json
+    ├── output/result.json
+    ├── output/rendered.md
+    ├── output/rendered.txt
+    ├── output/assets.zip
+    ├── assets/original/*
+    ├── assets/derived/keyframes/*
     └── logs/warnings.json
 ```
 
-SQLite is the durable source of truth for job state. SSE is an experience layer:
-clients must reconnect and query `GET /v1/documents/jobs/{job_id}` when events
-are missed.
+`result.json` 是主结果；两个 rendering 文件是便利视图。SQLite 是 Job 状态真值，
+SSE 只是增量体验层。
 
-## Parsing routes
+## 生命周期与安全
 
-- `standard`: Docling Standard on CPU; native text is preserved and OCR is used
-  only when configured and required.
-- `ocr`: Docling with full-page remote GLM-OCR intent for scans and images.
-- `auto`: standard first, then conservative fallback rules. Automatic VLM
-  fallback is off unless explicitly enabled.
-- `vlm`: optional manually selected remote Ollama/OpenAI-compatible VLM route.
+启动时打开 SQLite、标记中断 Job、创建有界队列并初始化解析 worker。Docling 的
+同步 CPU 转换在线程外执行；外部模型调用有独立超时、重试和并发限制。
 
-Unobservable page/region counts and confidence values remain `null` or absent.
-The service never invents confidence or backend provenance.
-
-## Trust boundaries
-
-Uploaded bytes and source URLs are untrusted. Validation checks magic bytes,
-size, page count, safe filenames, protocols, resolved IPs, and every redirect.
-Private/link-local/metadata destinations are denied by default. The UI sanitizes
-rendered Markdown. External model URLs are server configuration and cannot be
-supplied per request.
-
-## v0.1 scope
-
-The service ends at Markdown or plain text. Financial metric extraction,
-entities/relations, summarization, RAG, embeddings, vector databases, document
-question answering, and long-term document management belong downstream.
-
+上传字节与 URL 均不可信：校验 magic、OOXML 内容类型/关系、ZIP 展开边界、
+FFprobe 元数据、大小、单元数、文件名、协议、解析 IP 和每次重定向。OOXML 只遍历
+image relationship；video/media relationship 完全不进入处理或诊断。文档、FFmpeg
+和 VLM 分别有并发边界。模型 URL、模型名和 prompt 只能由服务端配置。

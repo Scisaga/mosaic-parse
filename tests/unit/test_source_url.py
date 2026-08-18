@@ -34,4 +34,3 @@ async def test_private_url_requires_explicit_opt_in() -> None:
 async def test_each_redirect_is_revalidated() -> None:
     with pytest.raises(SourceUrlError):
         await validate_redirect_url("https://8.8.8.8/report.pdf", "http://127.0.0.1/private")
-

@@ -1,0 +1,28 @@
+# syntax=docker/dockerfile:1.7
+
+ARG PARSER_IMAGE=ghcr.io/scisaga/mosaic-parse:0.3.0
+FROM ${PARSER_IMAGE}
+
+# Reuse the parser image's pinned CPU Torch/Transformers stack. The sidecar is
+# a separate process, but does not download or carry a second dependency stack.
+USER root
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip --python /app/.venv/bin/python install \
+      "torch==2.13.0+cpu" \
+      "torchvision==0.28.0+cpu" \
+      "transformers==5.8.1" \
+      "sentencepiece==0.2.2" \
+      "glmocr[server]==0.1.5"
+
+COPY --chown=app:app docker/glmocr-config.yaml /etc/glmocr/config.yaml
+
+ENV HF_HOME=/models/huggingface \
+    GLMOCR_MODE=selfhosted \
+    GLMOCR_LAYOUT_DEVICE=cpu
+
+USER app
+EXPOSE 5002
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10m --retries=10 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5002/health', timeout=5)" || exit 1
+
+CMD ["python", "-c", "import os; import glmocr.server as server; os.environ['http_proxy'] = os.environ.get('HTTP_PROXY', ''); os.environ['https_proxy'] = os.environ.get('HTTPS_PROXY', ''); server.main()", "--config", "/etc/glmocr/config.yaml"]

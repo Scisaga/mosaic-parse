@@ -12,12 +12,16 @@ REQUIRED_PATHS = {
     "/health",
     "/ready",
     "/v1/backends",
-    "/v1/documents/parse",
-    "/v1/documents/jobs",
-    "/v1/documents/jobs/{job_id}",
-    "/v1/documents/jobs/{job_id}/events",
-    "/v1/documents/jobs/{job_id}/result",
-    "/v1/documents/jobs/{job_id}/retry",
+    "/v1/content/parse",
+    "/v1/content/jobs",
+    "/v1/content/jobs/{job_id}",
+    "/v1/content/jobs/{job_id}/events",
+    "/v1/content/jobs/{job_id}/result",
+    "/v1/content/jobs/{job_id}/rendering/{format}",
+    "/v1/content/jobs/{job_id}/assets",
+    "/v1/content/jobs/{job_id}/assets/{asset_id}",
+    "/v1/content/jobs/{job_id}/bundle",
+    "/v1/content/jobs/{job_id}/retry",
     "/admin/reload",
     "/admin/cleanup",
 }
@@ -34,9 +38,13 @@ def validate(schema: dict[str, Any]) -> None:
     if schema.get("openapi") is None or schema.get("info", {}).get("title") is None:
         raise SystemExit("generated document is not an OpenAPI schema")
     paths = set(schema.get("paths", {}))
+    if any(path.startswith("/v1/documents") for path in paths):
+        raise SystemExit("OpenAPI still exposes the removed /v1/documents contract")
     missing = REQUIRED_PATHS - paths
     if missing:
         raise SystemExit(f"OpenAPI schema is missing required paths: {sorted(missing)}")
+    if schema.get("info", {}).get("title") != "MosaicParse":
+        raise SystemExit("OpenAPI title is not MosaicParse")
 
 
 def main() -> int:

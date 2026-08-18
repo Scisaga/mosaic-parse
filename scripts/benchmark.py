@@ -29,7 +29,7 @@ def run_one(client: httpx.Client, path: Path, args: argparse.Namespace) -> dict[
     started = time.perf_counter()
     with path.open("rb") as source:
         response = client.post(
-            "/v1/documents/parse",
+            "/v1/content/parse",
             files={"file": (path.name, source, "application/octet-stream")},
             data={
                 "mode": args.mode,

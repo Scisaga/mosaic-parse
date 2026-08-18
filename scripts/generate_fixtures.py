@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import shutil
+import subprocess
 from pathlib import Path
 
 import pymupdf
@@ -28,7 +30,7 @@ def _make_scan(path: Path) -> None:
     draw = ImageDraw.Draw(image)
     font = _font(34)
     small = _font(28)
-    draw.text((72, 70), "DOC-GLM ORIGINAL SCAN FIXTURE", fill="black", font=font)
+    draw.text((72, 70), "MOSAICPARSE ORIGINAL SCAN FIXTURE", fill="black", font=font)
     draw.text((72, 150), "Quarter   Revenue   Margin", fill="black", font=small)
     draw.text((72, 205), "Q1 2026   12,345.67  18.25%", fill="black", font=small)
     draw.text((72, 260), "Q2 2026   13,579.20  19.00%", fill="black", font=small)
@@ -38,12 +40,111 @@ def _make_scan(path: Path) -> None:
     image.save(path, format="PNG", optimize=True)
 
 
+def _make_visuals(output: Path) -> None:
+    natural = Image.new("RGB", (960, 640), "#71c7ec")
+    draw = ImageDraw.Draw(natural)
+    draw.ellipse((690, 55, 820, 185), fill="#f6c85f")
+    draw.polygon([(0, 520), (260, 220), (520, 520)], fill="#245274")
+    draw.polygon([(280, 520), (650, 165), (960, 520)], fill="#173b5c")
+    draw.rectangle((0, 500, 960, 640), fill="#2ec4a6")
+    natural.save(output / "natural-scene.png", optimize=True)
+
+    mixed = Image.new("RGB", (960, 640), "#f7f5ef")
+    draw = ImageDraw.Draw(mixed)
+    draw.rounded_rectangle((50, 45, 910, 595), 22, fill="white", outline="#173b5c", width=4)
+    draw.text((90, 80), "MIXED DASHBOARD", fill="#102a43", font=_font(34))
+    draw.text((90, 135), "Measured values and visual trend", fill="#102a43", font=_font(24))
+    bars = (170, 270, 210, 355, 300)
+    for index, height in enumerate(bars):
+        left = 110 + index * 130
+        draw.rectangle((left, 520 - height, left + 76, 520), fill="#2ec4a6")
+    draw.line((90, 520, 850, 520), fill="#102a43", width=4)
+    mixed.save(output / "mixed-screenshot.png", optimize=True)
+    natural.save(output / "natural-scene.webp", format="WEBP", quality=90)
+    natural.save(output / "natural-scene.bmp", format="BMP")
+    natural.save(output / "natural-scene.tiff", format="TIFF")
+
+
+def _make_video(path: Path) -> None:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        if path.is_file():
+            return
+        raise RuntimeError("ffmpeg is required to create scene-switch.mp4")
+    subprocess.run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=#173b5c:s=640x360:d=2:r=12",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=#2ec4a6:s=640x360:d=2:r=12",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=#ff786f:s=640x360:d=2:r=12",
+            "-filter_complex",
+            "[0:v][1:v][2:v]concat=n=3:v=1:a=0,format=yuv420p[v]",
+            "-map",
+            "[v]",
+            "-an",
+            "-c:v",
+            "libx264",
+            "-movflags",
+            "+faststart",
+            str(path),
+        ],
+        check=True,
+        timeout=60,
+    )
+
+
+def _make_office(output: Path) -> None:
+    from docx import Document
+    from pptx import Presentation
+    from pptx.util import Inches
+
+    image = output / "natural-scene.png"
+    document = Document()
+    document.add_heading("MosaicParse DOCX fixture", 0)
+    document.add_paragraph("This original fixture contains one embedded image.")
+    document.add_picture(str(image), width=Inches(4.5))
+    document.save(output / "embedded-image.docx")
+
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[5])
+    slide.shapes.title.text = "MosaicParse PPTX fixture"
+    slide.shapes.add_picture(str(image), Inches(1), Inches(1.7), width=Inches(6))
+    presentation.save(output / "embedded-image.pptx")
+
+    video_presentation = Presentation()
+    video_slide = video_presentation.slides.add_slide(video_presentation.slide_layouts[5])
+    video_slide.shapes.title.text = "Embedded video must be ignored"
+    video_slide.shapes.add_movie(
+        str(output / "scene-switch.mp4"),
+        Inches(1),
+        Inches(1.7),
+        width=Inches(6),
+        height=Inches(3.4),
+        poster_frame_image=str(image),
+        mime_type="video/mp4",
+    )
+    video_presentation.save(output / "embedded-video.pptx")
+
+
 def _new_pdf() -> pymupdf.Document:
     document = pymupdf.open()
     document.set_metadata(
         {
-            "title": "Docling GLM original test fixture",
-            "author": "Docling GLM contributors",
+            "title": "MosaicParse original test fixture",
+            "author": "MosaicParse contributors",
             "creator": "scripts/generate_fixtures.py",
             "producer": "PyMuPDF",
         }
@@ -54,7 +155,7 @@ def _new_pdf() -> pymupdf.Document:
 def _native_pdf(path: Path) -> None:
     document = _new_pdf()
     page = document.new_page(width=595, height=842)
-    page.insert_text((60, 72), "Docling GLM Test Report", fontsize=20)
+    page.insert_text((60, 72), "MosaicParse Test Report", fontsize=20)
     page.insert_text((60, 112), "This document has an extractable native text layer.", fontsize=11)
     page.insert_text((60, 150), "Revenue: 12,345.67", fontsize=12)
     page.insert_text((60, 176), "Operating margin: 18.25%", fontsize=12)
@@ -129,6 +230,9 @@ def generate(output: Path) -> None:
     output.mkdir(parents=True, exist_ok=True)
     scan = output / "sample-image.png"
     _make_scan(scan)
+    _make_visuals(output)
+    _make_video(output / "scene-switch.mp4")
+    _make_office(output)
     _native_pdf(output / "native-report.pdf")
     _scan_pdf(output / "scanned-report.pdf", scan)
     _mixed_pdf(output / "mixed-report.pdf", scan)
@@ -151,6 +255,30 @@ def validate(output: Path) -> None:
             image.verify()
     except (FileNotFoundError, OSError) as exc:
         errors.append(f"{image_path.name}: {exc}")
+    for name in (
+        "natural-scene.png",
+        "natural-scene.webp",
+        "natural-scene.bmp",
+        "natural-scene.tiff",
+        "mixed-screenshot.png",
+    ):
+        try:
+            with Image.open(output / name) as image:
+                image.verify()
+        except (FileNotFoundError, OSError) as exc:
+            errors.append(f"{name}: {exc}")
+    for name in ("embedded-image.docx", "embedded-image.pptx", "embedded-video.pptx"):
+        try:
+            import zipfile
+
+            with zipfile.ZipFile(output / name) as archive:
+                if "[Content_Types].xml" not in archive.namelist():
+                    errors.append(f"{name}: missing OOXML content types")
+        except (FileNotFoundError, zipfile.BadZipFile) as exc:
+            errors.append(f"{name}: {exc}")
+    video = output / "scene-switch.mp4"
+    if not video.is_file() or video.stat().st_size < 1_000:
+        errors.append("scene-switch.mp4: missing or implausibly small")
     for name, page_count in expected_pages.items():
         path = output / name
         try:

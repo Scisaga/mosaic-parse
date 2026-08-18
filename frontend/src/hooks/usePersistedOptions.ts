@@ -1,20 +1,15 @@
 import { useEffect, useState } from 'react'
 import type { ParseOptions } from '../types/api'
 
-const STORAGE_KEY = 'docling-glm.parse-options.v1'
+const STORAGE_KEY = 'mosaicparse.parse-options.v3'
 
 export const DEFAULT_OPTIONS: ParseOptions = {
-  mode: 'auto',
   profile: 'balanced',
-  outputFormat: 'markdown',
-  pageRange: '',
+  unitRange: '',
   language: 'zh,en',
-  enableVlmFallback: false,
-  preservePageBreaks: true,
-  includePages: true,
-  includeDiagnostics: true,
+  descriptionLanguage: 'zh-CN',
+  includeRenderings: true,
   timeoutSeconds: 300,
-  submissionKind: 'async',
 }
 
 export function readOptions(): ParseOptions {
@@ -22,10 +17,22 @@ export function readOptions(): ParseOptions {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return DEFAULT_OPTIONS
     const saved = JSON.parse(raw) as Partial<ParseOptions>
-    // The Web workspace always uses durable asynchronous jobs. Normalize old
-    // browser preferences so a previously saved sync mode cannot silently
-    // switch the submit endpoint back to the blocking API.
-    return { ...DEFAULT_OPTIONS, ...saved, submissionKind: 'async' }
+    return {
+      profile: saved.profile === 'fast' || saved.profile === 'balanced' || saved.profile === 'accurate'
+        ? saved.profile
+        : DEFAULT_OPTIONS.profile,
+      unitRange: typeof saved.unitRange === 'string' ? saved.unitRange : DEFAULT_OPTIONS.unitRange,
+      language: typeof saved.language === 'string' ? saved.language : DEFAULT_OPTIONS.language,
+      descriptionLanguage: saved.descriptionLanguage === 'en' || saved.descriptionLanguage === 'auto'
+        ? saved.descriptionLanguage
+        : DEFAULT_OPTIONS.descriptionLanguage,
+      includeRenderings: typeof saved.includeRenderings === 'boolean'
+        ? saved.includeRenderings
+        : DEFAULT_OPTIONS.includeRenderings,
+      timeoutSeconds: typeof saved.timeoutSeconds === 'number'
+        ? saved.timeoutSeconds
+        : DEFAULT_OPTIONS.timeoutSeconds,
+    }
   } catch {
     return DEFAULT_OPTIONS
   }

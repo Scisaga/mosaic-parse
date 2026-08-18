@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from datetime import timedelta
 from pathlib import Path
@@ -30,9 +31,9 @@ async def test_repository_persists_state_and_progress(tmp_path: Path) -> None:
     assert progressed.progress.current == 1
     completed = await repository.complete(
         "job_01TEST",
+        ir_path="result.json",
         markdown_path="result.md",
         text_path="result.txt",
-        metadata_path="metadata.json",
     )
     assert completed.status == JobStatus.COMPLETED
     assert (await repository.get("job_01TEST")) == completed
@@ -75,3 +76,48 @@ async def test_ping_requires_a_writable_database_transaction(tmp_path: Path) -> 
 
     repository._connect = readonly_connect  # type: ignore[method-assign]
     assert await repository.ping() is False
+
+
+async def test_versioned_migration_marks_active_legacy_job_interrupted(tmp_path: Path) -> None:
+    database = tmp_path / "jobs.db"
+    repository = JobRepository(database)
+    await repository.initialize()
+    await repository.create(job_record())
+    await repository.transition("job_01TEST", JobStatus.RUNNING)
+
+    with sqlite3.connect(database) as connection:
+        payload = json.loads(
+            connection.execute(
+                "SELECT record_json FROM jobs WHERE id=?", ("job_01TEST",)
+            ).fetchone()[0]
+        )
+        payload["object"] = "document.parse.job"
+        payload["options"]["page_range"] = payload["options"].pop("unit_range")
+        payload["options"].update(
+            {
+                "mode": "auto",
+                "output_format": "markdown",
+                "enable_vlm_fallback": False,
+                "preserve_page_breaks": True,
+                "include_pages": True,
+                "include_diagnostics": True,
+            }
+        )
+        payload["metadata_path"] = "/data/jobs/job_01TEST/output/metadata.json"
+        connection.execute(
+            "UPDATE jobs SET record_json=? WHERE id=?",
+            (json.dumps(payload), "job_01TEST"),
+        )
+        connection.execute("DELETE FROM schema_migrations WHERE version=2")
+
+    migrated = JobRepository(database)
+    await migrated.initialize()
+    restored = await migrated.require("job_01TEST")
+    assert restored.object == "content.parse.job"
+    assert restored.status == JobStatus.FAILED
+    assert restored.error is not None
+    assert restored.error.code == "legacy_interruption"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT name FROM schema_migrations WHERE version=2"
+        ).fetchone()[0] == "mosaicparse_content_contract"

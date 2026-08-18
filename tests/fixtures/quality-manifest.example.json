@@ -1,0 +1,28 @@
+{
+  "version": 2,
+  "cases": [
+    {
+      "id": "synthetic-native-table",
+      "file": "table-report.pdf",
+      "sha256": "replace-with-local-sha256",
+      "profile": "balanced",
+      "page_range": "1",
+      "max_duration_ms": 30000,
+      "document": {
+        "ordered_anchors": ["Synthetic report", "Total"]
+      },
+      "pages": [
+        {
+          "page_number": 1,
+          "text_anchors": ["Total"],
+          "forbidden_anchors": ["hallucinated"],
+          "dates": [],
+          "numeric_anchors": ["100"],
+          "allowed_warnings": [],
+          "source_kind": "native",
+          "quality_verdict": "trusted"
+        }
+      ]
+    }
+  ]
+}

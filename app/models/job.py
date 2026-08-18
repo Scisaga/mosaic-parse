@@ -1,4 +1,4 @@
-"""Persistent job models and the v0.1 state machine."""
+"""Persistent MosaicParse content-job models."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.parse_options import DocumentParseOptions
+from app.models.parse_options import ContentParseOptions
 
 
 def utc_now() -> datetime:
@@ -50,7 +50,7 @@ class JobProgress(BaseModel):
 
     current: int = Field(default=0, ge=0)
     total: int = Field(default=0, ge=0)
-    unit: str = "page"
+    unit: str = "unit"
 
     @property
     def percent(self) -> float:
@@ -71,7 +71,7 @@ class JobRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
-    object: str = "document.parse.job"
+    object: str = "content.parse.job"
     status: JobStatus = JobStatus.QUEUED
     filename: str
     mime_type: str
@@ -79,16 +79,16 @@ class JobRecord(BaseModel):
     page_count: int = Field(ge=1)
     source_path: str
     source_url: str | None = None
-    options: DocumentParseOptions = Field(default_factory=DocumentParseOptions)
+    options: ContentParseOptions = Field(default_factory=ContentParseOptions)
     progress: JobProgress = Field(default_factory=JobProgress)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     started_at: datetime | None = None
     completed_at: datetime | None = None
     expires_at: datetime | None = None
+    result_ir_path: str | None = None
     result_markdown_path: str | None = None
     result_text_path: str | None = None
-    metadata_path: str | None = None
     error: JobError | None = None
     attempt: int = Field(default=1, ge=1)
     parent_job_id: str | None = None

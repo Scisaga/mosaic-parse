@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import os
 import re
 import shutil
 import tempfile
+import zipfile
 from collections.abc import AsyncIterable, AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Literal
 
+from app.models.document_ir import ContentEvidenceIR
 from app.models.parse_result import DocumentParseResult
 from app.models.source import StoredSource
 from app.security.file_validation import FileValidationError, safe_filename, validate_stored_file
@@ -24,10 +27,14 @@ _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
 @dataclass(frozen=True, slots=True)
 class StoredResultPaths:
+    ir: Path
     markdown: Path
     text: Path
-    metadata: Path
     warnings: Path
+
+
+class LegacyEvidenceError(ValueError):
+    """Persisted result uses the retired pre-0.3 evidence contract."""
 
 
 class StorageService:
@@ -36,7 +43,11 @@ class StorageService:
         self.data_dir = setting_path(settings, "data_dir", "data").resolve()
         self.jobs_dir = self.data_dir / "jobs"
         self.max_upload_bytes = int(setting(settings, "max_upload_bytes", 200 * 1024 * 1024))
-        self.max_document_pages = int(setting(settings, "max_document_pages", 1_000))
+        self.max_content_units = int(setting(settings, "max_content_units", 1_000))
+        self.max_video_seconds = int(setting(settings, "max_video_seconds", 30 * 60))
+        self.max_video_frame_pixels = int(
+            setting(settings, "video_max_frame_pixels", 7680 * 4320)
+        )
 
     async def initialize(self) -> None:
         await asyncio.to_thread(self.jobs_dir.mkdir, parents=True, exist_ok=True)
@@ -59,6 +70,21 @@ class StorageService:
     def logs_dir(self, job_id: str) -> Path:
         return self.job_dir(job_id) / "logs"
 
+    def assets_dir(self, job_id: str) -> Path:
+        return self.job_dir(job_id) / "assets"
+
+    def original_assets_dir(self, job_id: str) -> Path:
+        return self.assets_dir(job_id) / "original"
+
+    def derived_assets_dir(self, job_id: str) -> Path:
+        return self.assets_dir(job_id) / "derived"
+
+    def keyframes_dir(self, job_id: str) -> Path:
+        return self.derived_assets_dir(job_id) / "keyframes"
+
+    def previews_dir(self, job_id: str) -> Path:
+        return self.derived_assets_dir(job_id) / "previews"
+
     async def create_job_layout(self, job_id: str) -> Path:
         root = self.job_dir(job_id)
 
@@ -68,7 +94,14 @@ class StorageService:
             if resolved.parent != jobs_root or root.is_symlink():
                 raise OSError("job storage path escapes the configured jobs directory")
             root.mkdir(parents=True, exist_ok=True)
-            for directory in (self.input_dir(job_id), self.output_dir(job_id), self.logs_dir(job_id)):
+            for directory in (
+                self.input_dir(job_id),
+                self.output_dir(job_id),
+                self.logs_dir(job_id),
+                self.original_assets_dir(job_id),
+                self.keyframes_dir(job_id),
+                self.previews_dir(job_id),
+            ):
                 if directory.is_symlink():
                     raise OSError("job storage subdirectory must not be a symbolic link")
                 directory.mkdir(parents=True, exist_ok=True)
@@ -76,7 +109,9 @@ class StorageService:
         await asyncio.to_thread(create)
         return root
 
-    async def _iter_stream(self, stream: object, chunk_size: int = 1024 * 1024) -> AsyncIterator[bytes]:
+    async def _iter_stream(
+        self, stream: object, chunk_size: int = 1024 * 1024
+    ) -> AsyncIterator[bytes]:
         while True:
             result = stream.read(chunk_size)  # type: ignore[attr-defined]
             chunk = await result if inspect.isawaitable(result) else result
@@ -94,7 +129,9 @@ class StorageService:
         *,
         source_url: str | None = None,
     ) -> StoredSource:
-        return await self.save_chunks(job_id, filename, self._iter_stream(stream), source_url=source_url)
+        return await self.save_chunks(
+            job_id, filename, self._iter_stream(stream), source_url=source_url
+        )
 
     async def save_bytes(
         self,
@@ -141,7 +178,9 @@ class StorageService:
                 temporary,
                 filename,
                 max_bytes=self.max_upload_bytes,
-                max_pages=self.max_document_pages,
+                max_pages=self.max_content_units,
+                max_video_seconds=self.max_video_seconds,
+                max_video_frame_pixels=self.max_video_frame_pixels,
             )
             target = input_dir / safe_filename(cleaned)
             if target.exists():
@@ -162,7 +201,9 @@ class StorageService:
     @staticmethod
     def _atomic_write(path: Path, data: bytes) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+        )
         temporary = Path(temporary_name)
         try:
             with os.fdopen(descriptor, "wb") as handle:
@@ -177,17 +218,19 @@ class StorageService:
     async def write_result(self, job_id: str, result: DocumentParseResult) -> StoredResultPaths:
         await self.create_job_layout(job_id)
         output = self.output_dir(job_id)
+        if result.evidence_ir is None:
+            raise ValueError("document evidence IR is required before persistence")
         paths = StoredResultPaths(
-            markdown=output / "result.md",
-            text=output / "result.txt",
-            metadata=output / "metadata.json",
+            ir=output / "result.json",
+            markdown=output / "rendered.md",
+            text=output / "rendered.txt",
             warnings=self.logs_dir(job_id) / "warnings.json",
         )
         warning_payload = {
             "document_warnings": [warning.model_dump(mode="json") for warning in result.warnings],
-            "pages": [
+            "units": [
                 {
-                    "page_number": page.page_number,
+                    "unit_index": page.page_number,
                     "status": page.status.value,
                     "warnings": [warning.model_dump(mode="json") for warning in page.warnings],
                 }
@@ -200,8 +243,8 @@ class StorageService:
             asyncio.to_thread(self._atomic_write, paths.text, result.plain_text.encode("utf-8")),
             asyncio.to_thread(
                 self._atomic_write,
-                paths.metadata,
-                result.model_dump_json(indent=2).encode("utf-8"),
+                paths.ir,
+                result.evidence_ir.model_dump_json(indent=2).encode("utf-8"),
             ),
             asyncio.to_thread(
                 self._atomic_write,
@@ -211,23 +254,137 @@ class StorageService:
         )
         return paths
 
-    def result_path(self, job_id: str, output_format: str = "markdown") -> Path | None:
-        filename = "result.txt" if str(output_format) == "text" else "result.md"
+    async def write_asset(
+        self,
+        job_id: str,
+        asset_id: str,
+        filename: str,
+        content: bytes,
+        *,
+        derived: bool = False,
+        derived_category: Literal["keyframes", "previews"] = "keyframes",
+    ) -> Path:
+        """Persist an addressable asset below the job boundary."""
+
+        self._validate_job_id(asset_id)
+        await self.create_job_layout(job_id)
+        if derived:
+            directory = (
+                self.keyframes_dir(job_id)
+                if derived_category == "keyframes"
+                else self.previews_dir(job_id)
+            )
+        else:
+            directory = self.original_assets_dir(job_id)
+        target = directory / f"{asset_id}__{safe_filename(filename)}"
+        await asyncio.to_thread(self._atomic_write, target, content)
+        return target
+
+    async def copy_asset(
+        self,
+        job_id: str,
+        asset_id: str,
+        filename: str,
+        source: Path,
+        *,
+        derived: bool = False,
+        derived_category: Literal["keyframes", "previews"] = "keyframes",
+    ) -> Path:
+        return await self.write_asset(
+            job_id,
+            asset_id,
+            filename,
+            await asyncio.to_thread(source.read_bytes),
+            derived=derived,
+            derived_category=derived_category,
+        )
+
+    def asset_path(self, job_id: str, asset_id: str) -> Path | None:
+        self._validate_job_id(asset_id)
+        root = self.assets_dir(job_id).resolve(strict=False)
+        matches = list(root.glob(f"**/{asset_id}__*")) if root.is_dir() else []
+        if len(matches) != 1 or not matches[0].is_file() or matches[0].is_symlink():
+            return None
+        candidate = matches[0].resolve()
+        if root not in candidate.parents:
+            raise ValueError("asset storage path escapes the configured job directory")
+        return candidate
+
+    async def build_bundle(self, job_id: str) -> Path:
+        """Atomically create and cache a ZIP bundle for a completed result."""
+
+        evidence = await self.read_evidence(job_id)
+        output = self.output_dir(job_id)
+        target = output / "assets.zip"
+        if target.is_file():
+            return target
+
+        def build() -> Path:
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=".assets.", suffix=".zip.tmp", dir=output
+            )
+            os.close(descriptor)
+            temporary = Path(temporary_name)
+            try:
+                manifest = {
+                    "schema_version": evidence.schema_version,
+                    "content_id": evidence.source.content_id,
+                    "source_sha256": evidence.source.source_sha256,
+                    "assets": [asset.model_dump(mode="json") for asset in evidence.assets],
+                }
+                with zipfile.ZipFile(
+                    temporary, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6
+                ) as archive:
+                    archive.writestr(
+                        "manifest.json",
+                        json.dumps(manifest, ensure_ascii=False, indent=2),
+                    )
+                    for asset in evidence.assets:
+                        path = self.asset_path(job_id, asset.asset_id)
+                        if path is None:
+                            continue
+                        data = path.read_bytes()
+                        if hashlib.sha256(data).hexdigest() != asset.sha256:
+                            raise OSError(f"asset checksum mismatch: {asset.asset_id}")
+                        archive.writestr(f"assets/{asset.asset_id}/{asset.filename}", data)
+                os.replace(temporary, target)
+                return target
+            except BaseException:
+                temporary.unlink(missing_ok=True)
+                raise
+
+        return await asyncio.to_thread(build)
+
+    def result_path(self, job_id: str, representation: str = "ir") -> Path | None:
+        filenames = {
+            "ir": "result.json",
+            "markdown": "rendered.md",
+            "text": "rendered.txt",
+        }
+        filename = filenames.get(str(representation))
+        if filename is None:
+            raise ValueError("invalid result representation")
         path = self.output_dir(job_id) / filename
         return path if path.is_file() else None
 
-    async def read_result(self, job_id: str, output_format: str = "markdown") -> str:
-        path = self.result_path(job_id, output_format)
+    async def read_result(self, job_id: str, representation: str = "ir") -> str:
+        path = self.result_path(job_id, representation)
         if path is None:
             raise FileNotFoundError(job_id)
         return await asyncio.to_thread(path.read_text, encoding="utf-8")
 
-    async def read_metadata(self, job_id: str) -> DocumentParseResult:
-        path = self.output_dir(job_id) / "metadata.json"
+    async def read_evidence(self, job_id: str) -> ContentEvidenceIR:
+        path = self.output_dir(job_id) / "result.json"
         if not path.is_file():
             raise FileNotFoundError(job_id)
         data = await asyncio.to_thread(path.read_text, encoding="utf-8")
-        return DocumentParseResult.model_validate_json(data)
+        try:
+            payload = json.loads(data)
+        except json.JSONDecodeError:
+            payload = None
+        if not isinstance(payload, dict) or payload.get("schema_version") != "content-evidence/1.0":
+            raise LegacyEvidenceError(job_id)
+        return ContentEvidenceIR.model_validate_json(data)
 
     async def copy_source(self, source: StoredSource, target_job_id: str) -> StoredSource:
         async def chunks() -> AsyncIterator[bytes]:

@@ -32,12 +32,13 @@ def test_quality_flags_empty_output_without_inventing_metrics() -> None:
         page_count=1,
         processed_pages=1,
         pages=[PageParseResult(page_number=1, content="")],
-        pipeline=ParsePipeline(mode="auto", profile="balanced", primary="docling-standard"),
+        pipeline=ParsePipeline(profile="balanced", primary="docling-standard"),
         usage=ParseUsage(input_bytes=100, duration_ms=1),
     )
     assessment = QualityService().assess(result)
     assert not assessment.acceptable
-    assert result.warnings[0].code == "low_text_content"
+    assert result.pages[0].status.value == "failed"
+    assert result.warnings[0].code == "no_usable_content"
     assert result.route_summary.native_text_pages is None
     assert result.route_summary.ocr_regions is None
 
@@ -61,3 +62,19 @@ def test_quality_ignores_repeated_low_information_link_placeholders() -> None:
 
     page.content = "真正重复且有信息的内容。" * 5
     assert any(warning.code == "repeated_text" for warning in quality.inspect_page(page))
+
+
+def test_quality_does_not_treat_repeated_table_decimals_as_repeated_prose() -> None:
+    page = PageParseResult(
+        page_number=1,
+        content=(
+            "# 财务表\n\n"
+            "| 项目 | 本期 | 上期 |\n"
+            "| --- | --- | --- |\n"
+            + "\n".join(f"| 科目 {index} | 100.00 | 100.00 |" for index in range(8))
+        ),
+    )
+
+    codes = {warning.code for warning in QualityService().inspect_page(page)}
+
+    assert "repeated_text" not in codes

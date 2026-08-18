@@ -21,4 +21,3 @@ async def get_backends(request: Request) -> BackendsResponse:
             capacity=runtime.settings.max_queued_jobs,
         ),
     )
-

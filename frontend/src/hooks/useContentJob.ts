@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { getDocumentJob, getDocumentResult, jobEventsUrl, parseJobEventData } from '../api/client'
+import { getContentJob, getContentResult, jobEventsUrl, parseJobEventData } from '../api/client'
 import { runSseLoop } from '../api/sse'
-import type { DocumentJob, JobEvent, PageParseResult } from '../types/api'
+import type { ContentJob, JobEvent } from '../types/api'
 
-const TERMINAL = new Set<DocumentJob['status']>(['completed', 'partial', 'failed', 'cancelled'])
+const TERMINAL = new Set<ContentJob['status']>(['completed', 'partial', 'failed', 'cancelled'])
 
-function statusFromEvent(event: JobEvent): DocumentJob['status'] | undefined {
+function statusFromEvent(event: JobEvent): ContentJob['status'] | undefined {
   if (event.status) return event.status
   if (event.type === 'job.started') return 'running'
   if (event.type === 'job.completed') return 'completed'
@@ -15,14 +15,14 @@ function statusFromEvent(event: JobEvent): DocumentJob['status'] | undefined {
   return undefined
 }
 
-export function useDocumentJob(seed: DocumentJob | null) {
+export function useContentJob(seed: ContentJob | null) {
   const queryClient = useQueryClient()
   const jobId = seed?.id ?? ''
   const [sseState, setSseState] = useState<'idle' | 'connecting' | 'live' | 'fallback'>('idle')
 
   const jobQuery = useQuery({
-    queryKey: ['document-job', jobId],
-    queryFn: () => getDocumentJob(jobId),
+    queryKey: ['content-job', jobId],
+    queryFn: () => getContentJob(jobId),
     enabled: Boolean(jobId),
     initialData: seed ?? undefined,
     refetchInterval: (query) => {
@@ -44,36 +44,14 @@ export function useDocumentJob(seed: DocumentJob | null) {
     const acceptEvent = (data: string, eventType: string) => {
       const event = parseJobEventData(data, eventType)
       if (!event) return
-      queryClient.setQueryData<DocumentJob>(['document-job', jobId], (current) => {
+      queryClient.setQueryData<ContentJob>(['content-job', jobId], (current) => {
         if (!current) return current
         const status = statusFromEvent(event)
         const nextCurrent = typeof event.current === 'number' ? event.current : current.progress.current
         const nextTotal = typeof event.total === 'number' ? event.total : current.progress.total
-        let pages = current.pages
-        if (typeof event.page_number === 'number' && event.type.startsWith('page.')) {
-          const pageStatus: PageParseResult['status'] = event.type === 'page.started' ? 'running'
-            : event.type === 'page.completed' ? 'completed'
-              : event.type === 'page.warning' ? 'warning'
-                : event.type === 'page.failed' ? 'failed' : 'queued'
-          const existing = (pages ?? []).find((page) => page.page_number === event.page_number)
-          const message = typeof event.message === 'string' ? event.message : undefined
-          const updated = {
-            ...existing,
-            page_number: event.page_number,
-            status: pageStatus,
-            backend: typeof event.backend === 'string' ? event.backend : existing?.backend,
-            duration_ms: typeof event.duration_ms === 'number' ? event.duration_ms : existing?.duration_ms,
-            warnings: message && (pageStatus === 'warning' || pageStatus === 'failed')
-              ? [...(existing?.warnings ?? []), { message }]
-              : existing?.warnings,
-          }
-          pages = [...(pages ?? []).filter((page) => page.page_number !== event.page_number), updated]
-            .sort((left, right) => left.page_number - right.page_number)
-        }
         return {
           ...current,
           status: status ?? current.status,
-          pages,
           progress: {
             ...current.progress,
             current: nextCurrent,
@@ -88,7 +66,7 @@ export function useDocumentJob(seed: DocumentJob | null) {
       // overwrite several closely-spaced page updates with the final state.
       // Keep polling as the recovery path and refresh once at terminal state.
       if (event.type === 'job.completed' || event.type === 'job.failed' || event.type === 'job.cancelled') {
-        void queryClient.invalidateQueries({ queryKey: ['document-job', jobId] })
+        void queryClient.invalidateQueries({ queryKey: ['content-job', jobId] })
       }
     }
 
@@ -106,8 +84,8 @@ export function useDocumentJob(seed: DocumentJob | null) {
   }, [jobId, queryClient, seed?.events_url, terminal])
 
   const resultQuery = useQuery({
-    queryKey: ['document-result', jobId],
-    queryFn: () => getDocumentResult(jobId),
+    queryKey: ['content-result', jobId],
+    queryFn: () => getContentResult(jobId),
     enabled: Boolean(jobId && job && (job.status === 'completed' || job.status === 'partial')),
     staleTime: Infinity,
     retry: 2,

@@ -14,7 +14,7 @@ describe('DocumentPreview empty states', () => {
     const { container } = render(
       <DocumentPreview source={{ kind: 'file', file: null, url: '' }} />,
     )
-    expect(screen.getByText('预览区等待文档')).toBeInTheDocument()
+    expect(screen.getByText('预览区等待内容')).toBeInTheDocument()
     expect(container.querySelector('.workspace-state-input-empty img')).toHaveAttribute('src', '/illustrations/workspace-input.png')
     expect(screen.queryByRole('img')).not.toBeInTheDocument()
   })

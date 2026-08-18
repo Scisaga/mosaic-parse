@@ -1,89 +1,127 @@
-# HTTP API
+# MosaicParse HTTP 与 MCP 契约
 
-默认 Base URL 为 `http://localhost:12303`。交互式契约见 `/docs` 和
-`/redoc`，机器可读契约见 `/openapi.json`。
+默认 Base URL 为 `http://localhost:12303`。在线定义以 `/openapi.json`、`/docs`
+和 `/redoc` 为准。MosaicParse 只产出可追溯内容证据和派生渲染，不执行
+Embedding、切块、索引、问答或领域实体抽取。
 
-## Authentication
+## 认证
 
-当 `API_KEY` 非空时，受保护的公共 API 推荐发送：
+设置 `API_KEY` 后，`/v1/content/*`、`/v1/backends` 与 `/mcp` 接受：
 
 ```http
 Authorization: Bearer <API_KEY>
 ```
 
-也接受 `X-API-Key: <API_KEY>`。管理接口不使用 API Key，而要求：
+也可使用 `X-API-Key`。管理端点只接受独立的 `X-Admin-Token`。资产 URL 与
+bundle 不会绕过 API Key。
 
-```http
-X-Admin-Token: <ADMIN_TOKEN>
-```
+## 输入与参数
 
-Health/readiness 的具体公开范围以部署配置和 OpenAPI 为准。密钥不能放入
-查询字符串。
+`POST /v1/content/parse` 和 `POST /v1/content/jobs` 使用
+`multipart/form-data`。`file` 与 `source_url` 必须且只能提供一个。
 
-## Parse options
-
-同步和异步创建接口使用 `multipart/form-data`，`file` 与 `source_url` 必须
-且只能提供一个。
-
-| Field | Values / type | Default |
+| 字段 | 值 | 默认值 |
 |---|---|---|
-| `file` | PDF, PNG, JPEG, WEBP, TIFF | — |
-| `source_url` | allowed HTTP/HTTPS URL | — |
-| `mode` | `auto`, `standard`, `ocr`, `vlm` | `auto` |
-| `profile` | `fast`, `balanced`, `accurate` | `balanced` |
-| `output_format` | `markdown`, `text` | `markdown` |
-| `page_range` | e.g. `1-5,8,10-12` | all pages |
-| `language` | comma-separated, e.g. `zh,en` | `zh,en` |
-| `enable_vlm_fallback` | boolean | `false` |
-| `preserve_page_breaks` | boolean | `true` |
-| `include_pages` | boolean | `false` |
-| `include_diagnostics` | boolean | `true` |
-| `timeout_seconds` | positive integer | configured timeout |
+| `file` | PDF、DOCX、PPTX、PNG、JPEG、WebP、TIFF、BMP、MP4、MOV、MKV、WebM、AVI | — |
+| `source_url` | 通过 SSRF 校验的 HTTP(S) URL | — |
+| `profile` | `fast\|balanced\|accurate` | `balanced` |
+| `unit_range` | 一基页/幻灯片范围，如 `1-5,8` | 全部 |
+| `language` | OCR 语言，逗号分隔 | `zh,en` |
+| `description_language` | `zh-CN\|en\|auto` | `zh-CN` |
+| `include_renderings` | 是否返回 Markdown/Text 投影视图 | `true` |
+| `timeout_seconds` | `1..86400` | 服务默认值 |
+| `prefer_async` | 仅 `/parse`；强制返回持久 Job | `false` |
 
-Page numbers are one-based. Duplicate/overlapping ranges are normalized; a
-range outside the document is rejected rather than silently changed.
+`unit_range` 的语义由真实格式决定：PDF/TIFF 是页，PPTX 是幻灯片；DOCX 和
+单帧图片只接受省略或 `1`；视频不接受范围。服务以 magic、OOXML 内容类型及
+FFprobe 结果为准，不信任上传的 Content-Type。
 
-## Synchronous parse
+`profile` 是唯一请求级质量控制。模型、后端 URL 与 prompt 均不能由请求指定。
+旧 `mode`、`output_format`、`vlm_policy`、`enable_vlm_fallback`、
+`preserve_page_breaks`、`include_pages`、`include_diagnostics` 会返回 422。
 
-```http
-POST /v1/documents/parse
-Content-Type: multipart/form-data
-```
+## 同步与自动异步
 
 ```bash
-curl --fail-with-body http://localhost:12303/v1/documents/parse \
+curl --fail-with-body http://localhost:12303/v1/content/parse \
   -H "Authorization: Bearer $API_KEY" \
-  -F file=@document.pdf \
-  -F mode=auto \
+  -F file=@photo.webp \
   -F profile=balanced \
-  -F output_format=markdown \
-  -F page_range=1-5 \
-  -F language=zh,en
+  -F description_language=zh-CN
 ```
 
-The JSON envelope includes document metadata, status, selected pipeline,
-content, warnings, and measured usage. Page/backend diagnostics are included
-only when observable. A request beyond `SYNC_MAX_BYTES` or `SYNC_MAX_PAGES`
-returns HTTP 409 `sync_limit_exceeded`; use the jobs endpoint instead.
+小型 PDF、图片、DOCX 和 PPTX 返回 HTTP 200 `ContentEvidenceIR`，同时仍创建
+保留 24 小时的持久 Job。独立视频、`prefer_async=true`、超过同步字节或单元限制
+的输入返回 HTTP 202 `JobResponse`。因此调用方必须同时处理 200 与 202。
 
-## Asynchronous jobs
+`POST /v1/content/jobs` 始终返回 202。视频只分析采样帧，不提取音轨，也不做
+ASR。文档内嵌视频完全忽略；文档内嵌图片会成为资产。
 
-Create a job with the same multipart options:
+## ContentEvidenceIR 1.0
 
-```http
-POST /v1/documents/jobs
+主结果的固定标识是：
+
+```json
+{
+  "object": "content.evidence",
+  "schema_version": "content-evidence/1.0",
+  "status": "completed",
+  "source": {
+    "content_id": "job_...",
+    "source_sha256": "...",
+    "filename": "slides.pptx",
+    "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "kind": "pptx",
+    "size_bytes": 12345,
+    "unit_count": 3,
+    "page_count": null,
+    "slide_count": 3,
+    "duration_ms": null,
+    "width": null,
+    "height": null
+  },
+  "units": [],
+  "assets": [],
+  "tables": [],
+  "logical_tables": [],
+  "visual_analysis": null,
+  "video_analysis": null,
+  "renderings": {"markdown": "...", "plain_text": "..."},
+  "diagnostics": {},
+  "warnings": [],
+  "runtime": {},
+  "links": {},
+  "created_at": "2026-08-19T00:00:00Z"
+}
 ```
 
-```bash
-curl --fail-with-body http://localhost:12303/v1/documents/jobs \
-  -H "Authorization: Bearer $API_KEY" \
-  -F file=@large-document.pdf \
-  -F mode=auto \
-  -F profile=balanced
+`units[].unit_type` 是 `page`、`slide`、`document_body`、`image` 或 `video`。
+每个单元可含 regions、blocks、tables 引用、asset 引用、渲染与实测诊断。表格
+单元格保留 row/column、span、bbox、所选文本、证据来源和 reason code。
+
+独立图片的结构化说明位于顶层 `visual_analysis`，并同时附在源图片资产上；文档
+图片说明位于对应 `assets[].visual_analysis`。重复图片以 SHA256 去重，多个出现位置
+记录在 `locations[]`。`mixed` 图片同时保留文档结构与视觉描述。
+
+`video_analysis` 包含实测时长/尺寸/编码、场景区间和单调关键帧时间戳。摘要只能
+声称采样帧可见的内容；`visual_only=true` 明确表示没有音频证据。
+
+`include_renderings=false` 只清空顶层和单元级 Markdown/Text，证据结构、图片描述、
+关键帧、诊断和告警仍保留。未知测量使用 `null`，不能以零冒充测量值。
+
+## Job、SSE 与结果
+
+```text
+POST   /v1/content/jobs
+GET    /v1/content/jobs/{id}
+GET    /v1/content/jobs/{id}/events
+GET    /v1/content/jobs/{id}/result
+GET    /v1/content/jobs/{id}/rendering/{markdown|text}
+POST   /v1/content/jobs/{id}/retry
+DELETE /v1/content/jobs/{id}
 ```
 
-The response contains a `job_*` ID and status/events/result URLs. Durable states
-are:
+状态流转：
 
 ```text
 queued -> running -> completed
@@ -92,111 +130,55 @@ queued -> running -> completed
 queued/running    -> cancelled
 ```
 
-Query the durable source of truth:
+SSE 进度单位可能为 `page`、`slide`、`asset` 或 `frame`。SSE 是增量体验层；断线后
+应重新读取 Job 状态。`partial` 表示父内容可用但至少一项非致命媒体处理失败，例如
+文档图片的 VLM 不可用。纯视觉独立图片/视频缺少 VLM 时整个任务失败。
 
-```http
-GET /v1/documents/jobs/{job_id}
+旧 Job 文件保留到原过期时间，但旧 IR 不转换；读取旧结果返回 409
+`legacy_result_contract`。
+
+## 资产与 bundle
+
+```text
+GET /v1/content/jobs/{id}/assets
+GET /v1/content/jobs/{id}/assets/{asset_id}
+GET /v1/content/jobs/{id}/bundle
 ```
 
-Subscribe to progress:
+资产元数据含 MIME、SHA256、字节数、宽高/时长、角色、父资产、出现位置、状态和
+鉴权下载 URL。独立图片返回原始字节；DOCX/PPTX 返回原始嵌入图片；PDF 只返回
+Docling 语义图片区域的页面裁剪；视频返回原视频和派生关键帧。
 
-```http
-GET /v1/documents/jobs/{job_id}/events
-Accept: text/event-stream
-```
+视频下载支持单个 HTTP byte range，并返回 `206`、`Content-Range` 和 SHA256
+ETag。bundle 按需原子生成并缓存，包含 `manifest.json` 和所有可用资产；生成时会
+重新核对每项 SHA256。
 
-Event names include `job.started`, `page.started`, `page.completed`,
-`page.warning`, `page.failed`, `job.progress`, `job.completed`, `job.failed`, and
-`heartbeat`. SSE delivery is not the source of truth; after reconnecting, query
-the job endpoint before continuing.
+## MCP
 
-Get or download a completed result:
+`GET/POST /mcp` 暴露且只暴露：
 
-```http
-GET /v1/documents/jobs/{job_id}/result?format=markdown&download=true
-```
+- `parse_content`
+- `get_content_job`
+- `get_content_evidence`
+- `get_content_rendering`
+- `get_content_assets`
 
-Content types are `text/markdown; charset=utf-8` and
-`text/plain; charset=utf-8`. Download filenames are sanitized.
+资源协议为 `mosaicparse://health`、`mosaicparse://backends`、
+`mosaicparse://usage`。大结果返回 HTTP URL；图片、视频和关键帧不内联 Base64。
 
-Retry or cancel/delete:
-
-```http
-POST   /v1/documents/jobs/{job_id}/retry
-DELETE /v1/documents/jobs/{job_id}
-```
-
-A retry creates a new execution attempt without rewriting the historical state
-of an unrelated job. A running delete first requests cancellation; persisted
-input/result removal follows the documented job state and retention policy.
-
-## Service status
-
-- `GET /health`: process liveness, version, uptime, queue depth, non-secret
-  limits, and a backend summary.
-- `GET /ready`: storage/converter readiness and requirements of the active
-  default route.
-- `GET /v1/backends`: individual Docling, GLM, and VLM availability/capability.
-
-GLM or VLM being disabled/unavailable does not crash the API. A route that
-requires the missing backend fails with an explicit warning/error. Native
-standard conversion remains available when GLM is disabled.
-
-## Administration
-
-```bash
-curl --fail-with-body -X POST http://localhost:12303/admin/reload \
-  -H "X-Admin-Token: $ADMIN_TOKEN"
-
-curl --fail-with-body -X POST http://localhost:12303/admin/cleanup \
-  -H "X-Admin-Token: $ADMIN_TOKEN"
-```
-
-Reload rebuilds cached parser/backend state in a controlled lifecycle. Cleanup
-removes jobs older than `JOB_RETENTION_HOURS` when their state permits it.
-
-## Error envelope
-
-Application errors use one JSON shape:
+## 错误协议
 
 ```json
 {
   "error": {
-    "code": "backend_unavailable",
-    "message": "GLM-OCR backend is unavailable",
-    "request_id": "req_01J...",
-    "details": {"backend": "glm-ocr-remote"}
+    "code": "validation_error",
+    "message": "The request parameters are invalid",
+    "request_id": "req_...",
+    "details": {}
   }
 }
 ```
 
-Common status codes:
-
-| HTTP | Meaning |
-|---:|---|
-| 400 | conflicting source/options, invalid URL or page range |
-| 401 | invalid API/admin credential |
-| 404 | job not found |
-| 409 | sync limit or invalid state transition |
-| 413 | upload/download exceeds configured bytes |
-| 415 | unsupported or mismatched file type |
-| 422 | field validation failure |
-| 429 | queue/concurrency limit reached |
-| 502 | GLM/Ollama upstream failure |
-| 504 | document/model timeout |
-
-## URL safety
-
-`source_url` allows HTTP/HTTPS only. Unless explicitly enabled, DNS results for
-localhost, private, loopback, link-local, multicast, reserved, and cloud
-metadata addresses are denied. Every redirect is resolved and checked again;
-redirect count, response bytes, and time are bounded.
-
-## MCP
-
-`GET/POST /mcp` exposes MCP 2.x Streamable HTTP tools for parsing and job/result
-queries. MCP large payloads use URLs or HTTP result downloads rather than huge
-inline responses. Allowed Host and Origin values are configured separately via
-`MCP_ALLOWED_HOSTS` and `MCP_ALLOWED_ORIGINS`; external domains must be listed
-explicitly.
-
+常见状态：400（输入冲突/范围/URL）、401（认证）、404（Job/资产）、409（状态或
+旧契约）、413（大小）、415（真实格式）、422（参数）、429（容量）、502（解析或
+必需模型后端）、504（超时）。旧 `/v1/documents/*` 不注册并返回 404。
