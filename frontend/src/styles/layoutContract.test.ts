@@ -20,3 +20,11 @@ describe('result rendering contract', () => {
     expect(styles).toContain('minmax(330px, 36fr) minmax(620px, 64fr)')
   })
 })
+
+describe('Mosaic header contract', () => {
+  it('uses CSS mosaic tiles and keeps stage labels unadorned', () => {
+    expect(styles).toContain('.stage-eyebrow::before { display: none; }')
+    expect(styles).toContain('conic-gradient(from 90deg at 50% 50%')
+    expect(styles).toContain('background-size: 160px 64px, 320px 128px')
+  })
+})

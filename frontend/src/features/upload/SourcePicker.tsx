@@ -52,7 +52,7 @@ export function SourcePicker({ source, onChange, disabled = false, detectedPages
     <section className="source-picker" aria-labelledby="source-heading">
       <div className="section-heading-row">
         <div className="section-heading-copy">
-          <span className="eyebrow">01 · 内容来源</span>
+          <span className="eyebrow stage-eyebrow">01 · 内容来源</span>
           <h2 id="source-heading">选择内容</h2>
           <p>上传文档、图片或视频，或粘贴可公开访问的内容地址。</p>
         </div>

@@ -67,7 +67,7 @@ export function ParseOptionsForm({ options, onChange, onSubmit, sourceReady, bus
     <form className="options-panel" onSubmit={submit} aria-labelledby="options-heading">
       <div className="options-title-row">
         <div className="options-title section-heading-copy">
-          <span className="eyebrow">02 · 解析策略</span>
+          <span className="eyebrow stage-eyebrow">02 · 解析策略</span>
           <h2 id="options-heading">解析设置</h2>
           <p>服务自动选择文档、视觉或视频链路，并生成统一的结构化解析结果。</p>
         </div>

@@ -46,6 +46,8 @@ a { color: inherit; }
 .sr-only { position: absolute !important; width: 1px !important; height: 1px !important; padding: 0 !important; margin: -1px !important; overflow: hidden !important; clip: rect(0, 0, 0, 0) !important; white-space: nowrap !important; border: 0 !important; }
 .eyebrow { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; color: var(--teal-dark); font-size: 12px; font-weight: 800; line-height: 1; letter-spacing: .09em; }
 .eyebrow::before { content: ""; width: 7px; height: 7px; flex: none; background: var(--cyan); box-shadow: 8px 0 0 var(--mosaic-yellow), 0 8px 0 var(--mosaic-coral); }
+.stage-eyebrow { gap: 0; }
+.stage-eyebrow::before { display: none; }
 
 .app-shell { min-height: 100vh; display: flex; flex-direction: column; }
 .app-header {
@@ -56,7 +58,12 @@ a { color: inherit; }
   gap: 24px;
   padding: 7px clamp(18px, 2.5vw, 42px);
   color: #f5f8f8;
-  background: var(--navy-deep);
+  background-color: var(--navy-deep);
+  background-image:
+    conic-gradient(from 90deg at 50% 50%, rgba(36, 95, 124, .38) 0 25%, transparent 0 50%, rgba(12, 142, 170, .2) 0 75%, transparent 0),
+    conic-gradient(from 90deg at 50% 50%, transparent 0 25%, rgba(44, 203, 234, .09) 0 50%, transparent 0 75%, rgba(244, 200, 91, .055) 0);
+  background-position: 0 0, 40px 16px;
+  background-size: 160px 64px, 320px 128px;
   border-bottom: 1px solid rgba(44, 203, 234, .34);
   box-shadow: 0 3px 14px rgba(12, 33, 56, .18);
 }

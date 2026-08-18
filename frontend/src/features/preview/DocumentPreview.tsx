@@ -126,7 +126,7 @@ export function DocumentPreview({ source, activePage, onPageChange, onMetadata }
     <article className="document-preview panel-surface" aria-labelledby="preview-heading">
       <div className="panel-header">
         <div className="panel-heading-copy">
-          <span className="eyebrow">03 · 原始内容</span>
+          <span className="eyebrow stage-eyebrow">03 · 原始内容</span>
           <h2 id="preview-heading">内容预览</h2>
           <p title={sourceName || undefined}>{sourceName || '等待选择内容'}</p>
         </div>

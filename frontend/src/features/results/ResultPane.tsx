@@ -299,7 +299,7 @@ export function ResultPane({ source, options, job, bundle, syncResult, loading =
   return (
     <article className="result-pane panel-surface" aria-labelledby="result-heading">
       <div className="panel-header result-header">
-        <div className="panel-heading-copy"><span className="eyebrow">04 · 解析输出</span><h2 id="result-heading">解析结果</h2><p title={filename || undefined}>{filename || '结果将在任务完成后显示'}</p></div>
+        <div className="panel-heading-copy"><span className="eyebrow stage-eyebrow">04 · 解析输出</span><h2 id="result-heading">解析结果</h2><p title={filename || undefined}>{filename || '结果将在任务完成后显示'}</p></div>
         <div className="result-actions">
           <button type="button" className="action-button" onClick={() => void copy()} disabled={!hasResult && tab !== 'api'}><CopyIcon /> {copied ? '已复制' : '复制'}</button>
           <button type="button" className="action-button" onClick={() => downloadText(serializeResult(), safeFilename(filename, 'json'), 'application/json;charset=utf-8')} disabled={!hasResult}><DownloadIcon /> .json</button>
