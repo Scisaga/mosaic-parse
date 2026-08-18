@@ -60,10 +60,14 @@ a { color: inherit; }
   color: #f5f8f8;
   background-color: var(--navy-deep);
   background-image:
-    conic-gradient(from 90deg at 50% 50%, rgba(36, 95, 124, .38) 0 25%, transparent 0 50%, rgba(12, 142, 170, .2) 0 75%, transparent 0),
-    conic-gradient(from 90deg at 50% 50%, transparent 0 25%, rgba(44, 203, 234, .09) 0 50%, transparent 0 75%, rgba(244, 200, 91, .055) 0);
-  background-position: 0 0, 40px 16px;
-  background-size: 160px 64px, 320px 128px;
+    linear-gradient(rgba(3, 20, 34, .42) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(3, 20, 34, .42) 1px, transparent 1px),
+    radial-gradient(ellipse 72% 190% at 18% 155%, transparent 0 43%, rgba(12, 142, 170, .42) 44% 54%, rgba(44, 203, 234, .2) 55% 62%, transparent 63%),
+    radial-gradient(ellipse 68% 185% at 82% -70%, transparent 0 43%, rgba(36, 95, 124, .5) 44% 55%, rgba(12, 142, 170, .24) 56% 64%, transparent 65%),
+    linear-gradient(110deg, #0c2138 0 22%, #12364d 22% 42%, #15536a 42% 55%, #0f4258 55% 73%, #0c2138 73% 100%);
+  background-position: 0 0, 0 0, center center, center center, center center;
+  background-repeat: repeat, repeat, no-repeat, no-repeat, no-repeat;
+  background-size: 13px 13px, 13px 13px, 100% 260px, 100% 260px, 100% 100%;
   border-bottom: 1px solid rgba(44, 203, 234, .34);
   box-shadow: 0 3px 14px rgba(12, 33, 56, .18);
 }
