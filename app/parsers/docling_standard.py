@@ -22,7 +22,7 @@ from app.models.parse_result import (
     PageStatus,
     ParsePipeline,
     ParseUsage,
-    ParseWarning,
+    PipelineWarning,
     RouteSummary,
     WarningSeverity,
 )
@@ -662,12 +662,12 @@ class DoclingStandardParser(DocumentParser):
                             if export_text
                             else None
                         )
-                        page_warnings: list[ParseWarning] = []
+                        page_warnings: list[PipelineWarning] = []
                         page_status = PageStatus.COMPLETED
                         if error_messages:
                             page_status = PageStatus.WARNING
                             page_warnings.append(
-                                ParseWarning(
+                                PipelineWarning(
                                     code="docling_partial_conversion",
                                     message="Docling reported one or more conversion errors",
                                     page_number=page_number,
@@ -683,7 +683,7 @@ class DoclingStandardParser(DocumentParser):
                         if invalid_tables:
                             page_status = PageStatus.WARNING
                             page_warnings.append(
-                                ParseWarning(
+                                PipelineWarning(
                                     code="table_structure_invalid",
                                     message="one or more Docling tables contain invalid or overlapping cell spans",
                                     page_number=page_number,
@@ -701,7 +701,7 @@ class DoclingStandardParser(DocumentParser):
                             )
                         if duplicate_counts:
                             page_warnings.append(
-                                ParseWarning(
+                                PipelineWarning(
                                     code="overlapping_ocr_boxes_deduplicated",
                                     message="identical text from highly overlapping OCR boxes was emitted once",
                                     severity=WarningSeverity.INFO,
@@ -736,7 +736,7 @@ class DoclingStandardParser(DocumentParser):
                                     0, round((time.perf_counter() - page_started) * 1000)
                                 ),
                                 warnings=[
-                                    ParseWarning(
+                                    PipelineWarning(
                                         code="page_export_failed",
                                         message=f"failed to export page: {type(exc).__name__}",
                                         severity=WarningSeverity.ERROR,
@@ -762,10 +762,10 @@ class DoclingStandardParser(DocumentParser):
             if release_slot:
                 self._available_slots.put_nowait(worker_slot)
 
-        warnings: list[ParseWarning] = []
+        warnings: list[PipelineWarning] = []
         if not glm_status.ready:
             warnings.append(
-                ParseWarning(
+                PipelineWarning(
                     code="glm_ocr_unavailable",
                     message="GLM-OCR was unavailable; Docling ran without remote OCR",
                     backend=self.glm_adapter.name,

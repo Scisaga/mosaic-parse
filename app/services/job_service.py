@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from app.models.document_ir import ContentEvidenceIR
+from app.models.content_result import ContentParseResult
 from app.models.error import ServiceError
 from app.models.job import JobEvent, JobProgress, JobRecord, JobStatus
 from app.models.parse_options import ContentParseOptions
@@ -19,7 +19,7 @@ from app.repositories.job_repository import JobRepository
 from app.security.file_validation import DOCX_MIME, IMAGE_MIME_TYPES, PPTX_MIME, VIDEO_MIME_TYPES
 from app.services.parser_service import ParserService
 from app.services.source_service import SourceService
-from app.services.storage_service import LegacyEvidenceError, StorageService
+from app.services.storage_service import LegacyResultContractError, StorageService
 from app.utils.ids import new_job_id
 from app.utils.page_range import PageRangeError, parse_page_range
 from app.utils.settings import setting
@@ -216,13 +216,13 @@ class JobService:
         try:
             result = await self.parser_service.parse(source, options, document_id=job_id)
             paths = await self.storage.write_result(job_id, result)
-            partial = bool(result.evidence_ir and result.evidence_ir.status == "partial")
+            partial = bool(result.parse_result and result.parse_result.status == "partial")
             await self.repository.update_progress(
                 job_id, len(selected), len(selected), self._progress_unit(source.mime_type)
             )
             await self.repository.complete(
                 job_id,
-                ir_path=str(paths.ir),
+                result_path=str(paths.result),
                 markdown_path=str(paths.markdown),
                 text_path=str(paths.text),
                 partial=partial,
@@ -565,10 +565,10 @@ class JobService:
                 final_progress_total,
                 self._progress_unit(record.mime_type),
             )
-            partial = bool(result.evidence_ir and result.evidence_ir.status == "partial")
+            partial = bool(result.parse_result and result.parse_result.status == "partial")
             await self.repository.complete(
                 job_id,
-                ir_path=str(paths.ir),
+                result_path=str(paths.result),
                 markdown_path=str(paths.markdown),
                 text_path=str(paths.text),
                 partial=partial,
@@ -579,7 +579,7 @@ class JobService:
                 status="partial" if partial else "completed",
                 failed_units=sum(
                     unit.status == "failed"
-                    for unit in (result.evidence_ir.units if result.evidence_ir else [])
+                    for unit in (result.parse_result.units if result.parse_result else [])
                 ),
             )
         except asyncio.CancelledError:
@@ -688,7 +688,7 @@ class JobService:
         self._event_counters.pop(job_id, None)
         return deleted
 
-    async def get_result(self, job_id: str, representation: str = "ir") -> str:
+    async def get_result(self, job_id: str, representation: str = "result") -> str:
         record = await self.get_job(job_id)
         if record.status not in {JobStatus.COMPLETED, JobStatus.PARTIAL}:
             raise ServiceError("result_not_ready", "job result is not available", status_code=409)
@@ -699,21 +699,21 @@ class JobService:
                 "result_missing", "persisted result file is missing", status_code=500
             ) from exc
 
-    async def get_evidence(self, job_id: str) -> ContentEvidenceIR:
+    async def get_parse_result(self, job_id: str) -> ContentParseResult:
         record = await self.get_job(job_id)
         if record.status not in {JobStatus.COMPLETED, JobStatus.PARTIAL}:
             raise ServiceError("result_not_ready", "job result is not available", status_code=409)
         try:
-            return await self.storage.read_evidence(job_id)
-        except LegacyEvidenceError as exc:
+            return await self.storage.read_parse_result(job_id)
+        except LegacyResultContractError as exc:
             raise ServiceError(
                 "legacy_result_contract",
-                "this retained job uses the retired evidence contract and is not converted",
+                "this retained job uses a retired result contract and is not converted",
                 status_code=409,
             ) from exc
         except FileNotFoundError as exc:
             raise ServiceError(
-                "result_missing", "persisted evidence IR is missing", status_code=500
+                "result_missing", "persisted parse result is missing", status_code=500
             ) from exc
 
     async def events(

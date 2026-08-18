@@ -37,7 +37,7 @@ def parsed_result(source: StoredSource, document_id: str) -> DocumentParseResult
         pipeline=ParsePipeline(profile="balanced", primary="fake"),
         route_summary=RouteSummary(failed_pages=0),
     )
-    parsed.evidence_ir = DocumentIRService().build(parsed, source, {})
+    parsed.parse_result = DocumentIRService().build(parsed, source, {})
     return parsed
 
 

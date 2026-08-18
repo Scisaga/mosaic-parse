@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Literal
 
-from app.models.document_ir import ContentEvidenceIR
+from app.models.content_result import ContentParseResult
 from app.models.parse_result import DocumentParseResult
 from app.models.source import StoredSource
 from app.security.file_validation import FileValidationError, safe_filename, validate_stored_file
@@ -27,14 +27,14 @@ _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
 @dataclass(frozen=True, slots=True)
 class StoredResultPaths:
-    ir: Path
+    result: Path
     markdown: Path
     text: Path
     warnings: Path
 
 
-class LegacyEvidenceError(ValueError):
-    """Persisted result uses the retired pre-0.3 evidence contract."""
+class LegacyResultContractError(ValueError):
+    """Persisted result does not use the current parse-result contract."""
 
 
 class StorageService:
@@ -218,10 +218,10 @@ class StorageService:
     async def write_result(self, job_id: str, result: DocumentParseResult) -> StoredResultPaths:
         await self.create_job_layout(job_id)
         output = self.output_dir(job_id)
-        if result.evidence_ir is None:
-            raise ValueError("document evidence IR is required before persistence")
+        if result.parse_result is None:
+            raise ValueError("content parse result is required before persistence")
         paths = StoredResultPaths(
-            ir=output / "result.json",
+            result=output / "result.json",
             markdown=output / "rendered.md",
             text=output / "rendered.txt",
             warnings=self.logs_dir(job_id) / "warnings.json",
@@ -243,8 +243,8 @@ class StorageService:
             asyncio.to_thread(self._atomic_write, paths.text, result.plain_text.encode("utf-8")),
             asyncio.to_thread(
                 self._atomic_write,
-                paths.ir,
-                result.evidence_ir.model_dump_json(indent=2).encode("utf-8"),
+                paths.result,
+                result.parse_result.model_dump_json(indent=2).encode("utf-8"),
             ),
             asyncio.to_thread(
                 self._atomic_write,
@@ -313,7 +313,7 @@ class StorageService:
     async def build_bundle(self, job_id: str) -> Path:
         """Atomically create and cache a ZIP bundle for a completed result."""
 
-        evidence = await self.read_evidence(job_id)
+        parse_result = await self.read_parse_result(job_id)
         output = self.output_dir(job_id)
         target = output / "assets.zip"
         if target.is_file():
@@ -327,10 +327,11 @@ class StorageService:
             temporary = Path(temporary_name)
             try:
                 manifest = {
-                    "schema_version": evidence.schema_version,
-                    "content_id": evidence.source.content_id,
-                    "source_sha256": evidence.source.source_sha256,
-                    "assets": [asset.model_dump(mode="json") for asset in evidence.assets],
+                    "object": parse_result.object,
+                    "schema_version": parse_result.schema_version,
+                    "content_id": parse_result.source.content_id,
+                    "source_sha256": parse_result.source.source_sha256,
+                    "assets": [asset.model_dump(mode="json") for asset in parse_result.assets],
                 }
                 with zipfile.ZipFile(
                     temporary, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6
@@ -339,7 +340,7 @@ class StorageService:
                         "manifest.json",
                         json.dumps(manifest, ensure_ascii=False, indent=2),
                     )
-                    for asset in evidence.assets:
+                    for asset in parse_result.assets:
                         path = self.asset_path(job_id, asset.asset_id)
                         if path is None:
                             continue
@@ -355,9 +356,9 @@ class StorageService:
 
         return await asyncio.to_thread(build)
 
-    def result_path(self, job_id: str, representation: str = "ir") -> Path | None:
+    def result_path(self, job_id: str, representation: str = "result") -> Path | None:
         filenames = {
-            "ir": "result.json",
+            "result": "result.json",
             "markdown": "rendered.md",
             "text": "rendered.txt",
         }
@@ -367,13 +368,13 @@ class StorageService:
         path = self.output_dir(job_id) / filename
         return path if path.is_file() else None
 
-    async def read_result(self, job_id: str, representation: str = "ir") -> str:
+    async def read_result(self, job_id: str, representation: str = "result") -> str:
         path = self.result_path(job_id, representation)
         if path is None:
             raise FileNotFoundError(job_id)
         return await asyncio.to_thread(path.read_text, encoding="utf-8")
 
-    async def read_evidence(self, job_id: str) -> ContentEvidenceIR:
+    async def read_parse_result(self, job_id: str) -> ContentParseResult:
         path = self.output_dir(job_id) / "result.json"
         if not path.is_file():
             raise FileNotFoundError(job_id)
@@ -382,9 +383,13 @@ class StorageService:
             payload = json.loads(data)
         except json.JSONDecodeError:
             payload = None
-        if not isinstance(payload, dict) or payload.get("schema_version") != "content-evidence/1.0":
-            raise LegacyEvidenceError(job_id)
-        return ContentEvidenceIR.model_validate_json(data)
+        if (
+            not isinstance(payload, dict)
+            or payload.get("object") != "content.parse_result"
+            or payload.get("schema_version") != "content-parse-result/1.0"
+        ):
+            raise LegacyResultContractError(job_id)
+        return ContentParseResult.model_validate_json(data)
 
     async def copy_source(self, source: StoredSource, target_job_id: str) -> StoredSource:
         async def chunks() -> AsyncIterator[bytes]:

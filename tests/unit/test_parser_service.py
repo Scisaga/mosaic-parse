@@ -188,20 +188,20 @@ async def test_reload_waits_for_active_parse_and_uses_rebuilt_parser(monkeypatch
     assert new_parser.calls == 1
 
 
-async def test_parse_always_materializes_document_evidence_ir(monkeypatch) -> None:
+async def test_parse_always_materializes_content_parse_result(monkeypatch) -> None:
     service = ParserService(SimpleNamespace(parser_workers=1, content_timeout_seconds=1.0))
     install_parser(service, ImmediateParser("Evidence text"), monkeypatch)
 
     parsed = await service.parse(stored_source(), ContentParseOptions(), document_id="docparse_ir")
 
-    assert parsed.evidence_ir is not None
-    assert parsed.evidence_ir.object == "content.evidence"
-    assert parsed.evidence_ir.source.content_id == "docparse_ir"
-    assert parsed.evidence_ir.units[0].blocks[0].text == "Evidence text"
-    assert parsed.evidence_ir.renderings.markdown.endswith("Evidence text")
+    assert parsed.parse_result is not None
+    assert parsed.parse_result.object == "content.parse_result"
+    assert parsed.parse_result.source.content_id == "docparse_ir"
+    assert parsed.parse_result.units[0].blocks[0].text == "Evidence text"
+    assert parsed.parse_result.renderings.markdown.endswith("Evidence text")
 
 
-async def test_include_renderings_false_does_not_remove_evidence(monkeypatch) -> None:
+async def test_include_renderings_false_does_not_remove_parse_result(monkeypatch) -> None:
     service = ParserService(SimpleNamespace(parser_workers=1, content_timeout_seconds=1.0))
     install_parser(service, ImmediateParser("Evidence text"), monkeypatch)
 
@@ -211,10 +211,10 @@ async def test_include_renderings_false_does_not_remove_evidence(monkeypatch) ->
         document_id="docparse_ir_no_rendering",
     )
 
-    assert parsed.evidence_ir is not None
-    assert parsed.evidence_ir.units[0].blocks[0].text == "Evidence text"
-    assert parsed.evidence_ir.renderings.markdown == ""
-    assert parsed.evidence_ir.units[0].renderings.markdown == ""
+    assert parsed.parse_result is not None
+    assert parsed.parse_result.units[0].blocks[0].text == "Evidence text"
+    assert parsed.parse_result.renderings.markdown == ""
+    assert parsed.parse_result.units[0].renderings.markdown == ""
 
 
 async def test_balanced_skips_visual_and_accurate_invokes_visual_once(monkeypatch) -> None:
@@ -315,5 +315,5 @@ async def test_automatic_text_normalization_uses_native_lexicon(monkeypatch) -> 
     )
     expected = "制造企业已经拥有，MES 与 Physical World Model。"
     assert parsed.pages[0].content == expected
-    assert parsed.evidence_ir is not None
-    assert parsed.evidence_ir.units[0].blocks[0].text == expected
+    assert parsed.parse_result is not None
+    assert parsed.parse_result.units[0].blocks[0].text == expected

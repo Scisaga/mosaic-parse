@@ -8,7 +8,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
-from app.models.document_ir import ContentEvidenceIR
+from app.models.content_result import ContentParseResult
 
 
 def utc_now() -> datetime:
@@ -91,7 +91,7 @@ class QualitySummary(BaseModel):
     unresolved_visual_conflicts: int = Field(default=0, ge=0)
 
 
-class ParseWarning(BaseModel):
+class PipelineWarning(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     code: str = Field(min_length=1, max_length=128)
@@ -111,7 +111,7 @@ class PageParseResult(BaseModel):
     content: str | None = None
     plain_text: str | None = None
     duration_ms: int = Field(default=0, ge=0)
-    warnings: list[ParseWarning] = Field(default_factory=list)
+    warnings: list[PipelineWarning] = Field(default_factory=list)
     diagnostics: PageDiagnostics | None = None
 
 
@@ -162,11 +162,11 @@ class DocumentParseResult(BaseModel):
     pages: list[PageParseResult] = Field(default_factory=list)
     pipeline: ParsePipeline
     route_summary: RouteSummary = Field(default_factory=RouteSummary)
-    warnings: list[ParseWarning] = Field(default_factory=list)
+    warnings: list[PipelineWarning] = Field(default_factory=list)
     quality_summary: QualitySummary | None = None
     usage: ParseUsage = Field(default_factory=ParseUsage)
     created_at: datetime = Field(default_factory=utc_now)
-    evidence_ir: ContentEvidenceIR | None = None
+    parse_result: ContentParseResult | None = None
 
     # Adapter-private, request-scoped enrichment hints.  These never cross the
     # stable API/storage boundary and deliberately stay out of the JSON schema.

@@ -133,9 +133,9 @@ async def parse_content(
     if isinstance(result, JobRecord):
         response.status_code = status.HTTP_202_ACCEPTED
         return JobResponse.from_record(result)
-    if result.evidence_ir is None:
-        raise ServiceError("ir_missing", "content evidence IR was not produced", status_code=500)
-    return result.evidence_ir
+    if result.parse_result is None:
+        raise ServiceError("result_missing", "content parse result was not produced", status_code=500)
+    return result.parse_result
 
 
 @router.post(

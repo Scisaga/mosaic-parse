@@ -3,9 +3,9 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ResultPane } from './ResultPane'
 import { DEFAULT_OPTIONS } from '../../hooks/usePersistedOptions'
-import type { ContentUnitIR, ParseResult } from '../../types/api'
+import type { ContentUnit, ParseResult } from '../../types/api'
 
-function page(pageNumber: number, status: ContentUnitIR['status'], markdown: string, plainText: string): ContentUnitIR {
+function page(pageNumber: number, status: ContentUnit['status'], markdown: string, plainText: string): ContentUnit {
   return {
     unit_id: `p${pageNumber}`,
     unit_type: 'page',
@@ -38,8 +38,8 @@ function page(pageNumber: number, status: ContentUnitIR['status'], markdown: str
 }
 
 const result: ParseResult = {
-  object: 'content.evidence',
-  schema_version: 'content-evidence/1.0',
+  object: 'content.parse_result',
+  schema_version: 'content-parse-result/1.0',
   status: 'completed',
   source: {
     content_id: 'content_1',
@@ -81,7 +81,7 @@ const result: ParseResult = {
     primary_backend: 'docling-standard',
     ocr_backend: 'glm-ocr',
     visual_backend: 'qwen3.6',
-    parser_version: '0.3.0',
+    parser_version: '0.4.0',
     input_bytes: 3,
     duration_ms: 210,
     qwen_calls: 1,
@@ -93,7 +93,7 @@ const result: ParseResult = {
 }
 
 describe('ResultPane', () => {
-  it('presents evidence IR as the primary empty state', async () => {
+  it('presents the parse overview as the primary empty state', async () => {
     const user = userEvent.setup()
     const { container } = render(
       <ResultPane
@@ -103,14 +103,17 @@ describe('ResultPane', () => {
         onSelectPage={vi.fn()}
       />,
     )
-    expect(screen.getByText('等待证据 IR')).toBeInTheDocument()
-    await user.click(screen.getByRole('tab', { name: 'Markdown 派生视图' }))
+    expect(screen.getByText('等待解析结果')).toBeInTheDocument()
+    expect(screen.getAllByRole('tab').map((tab) => tab.textContent)).toEqual([
+      '概览', 'Markdown', '纯文本', '内容单元', '媒体', 'API 示例',
+    ])
+    await user.click(screen.getByRole('tab', { name: 'Markdown' }))
     expect(container.querySelector('.workspace-state-output-empty')).toBeInTheDocument()
     await user.click(screen.getByRole('tab', { name: /内容单元/ }))
     expect(screen.getByText('暂无内容单元')).toBeInTheDocument()
   })
 
-  it('renders sanitized Markdown and IR page diagnostics', async () => {
+  it('renders sanitized Markdown and unit diagnostics', async () => {
     const user = userEvent.setup()
     const onSelectPage = vi.fn()
     const onRetryPage = vi.fn()
@@ -124,12 +127,13 @@ describe('ResultPane', () => {
         onRetryPage={onRetryPage}
       />,
     )
-    expect(screen.getByText(/content-evidence\/1.0/)).toBeInTheDocument()
+    expect(screen.getByText(/content-parse-result\/1.0/)).toBeInTheDocument()
     expect(screen.getByText('2 / 2')).toBeInTheDocument()
-    expect(screen.getByText('结构化证据摘要')).toBeInTheDocument()
-    expect(container.querySelector('.result-evidence pre')).not.toBeInTheDocument()
+    expect(screen.getByText('解析摘要')).toBeInTheDocument()
+    expect(screen.getByText('来源追踪')).toBeInTheDocument()
+    expect(container.querySelector('.result-overview pre')).not.toBeInTheDocument()
     expect(screen.queryByText('安全标题')).not.toBeInTheDocument()
-    await user.click(screen.getByRole('tab', { name: 'Markdown 派生视图' }))
+    await user.click(screen.getByRole('tab', { name: 'Markdown' }))
     expect(await screen.findByRole('heading', { name: '安全标题' })).toBeInTheDocument()
     expect(container.querySelector('script')).not.toBeInTheDocument()
     await user.click(screen.getByRole('tab', { name: /内容单元/ }))
@@ -138,7 +142,7 @@ describe('ResultPane', () => {
     expect(onRetryPage).toHaveBeenCalledWith(2)
     await user.click(screen.getByText('P.2'))
     expect(onSelectPage).toHaveBeenCalledWith(2)
-    expect(screen.getByRole('tab', { name: 'Markdown 派生视图' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('tab', { name: 'Markdown' })).toHaveAttribute('aria-selected', 'true')
   })
 
   it('opens and highlights a selected physical page rendering', async () => {

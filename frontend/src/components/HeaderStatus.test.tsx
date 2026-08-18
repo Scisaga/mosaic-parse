@@ -12,6 +12,7 @@ describe('HeaderStatus', () => {
           backends: [
             { id: 'docling', label: 'Docling', status: 'ready' },
             { id: 'glm', label: 'GLM', status: 'unavailable', message: '连接失败' },
+            { id: 'vlm', label: 'VLM', status: 'ready' },
           ],
           queue: { active: 1, capacity: 8 },
         }}
@@ -22,10 +23,16 @@ describe('HeaderStatus', () => {
       />,
     )
 
+    const summary = screen.getByRole('button', { name: '服务 3/4 就绪' })
+    expect(summary).toHaveAttribute('aria-expanded', 'false')
+    await user.click(summary)
     expect(screen.getByText('API')).toBeInTheDocument()
     expect(screen.getByText('GLM')).toBeInTheDocument()
     expect(screen.getByTitle('连接失败')).toHaveClass('status-unavailable')
     expect(screen.getByText('任务队列')).toBeInTheDocument()
+    await user.keyboard('{Escape}')
+    expect(screen.queryByLabelText('服务状态详情')).not.toBeInTheDocument()
+    expect(summary).toHaveFocus()
 
     const settingsButton = screen.getByRole('button', { name: /连接设置/ })
     await user.click(settingsButton)

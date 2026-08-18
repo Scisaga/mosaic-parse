@@ -42,7 +42,7 @@ def create_mcp(runtime: Callable[[], Runtime], settings: Settings) -> McpBundle:
         "MosaicParse",
         version=settings.version,
         instructions=(
-            "Parse PDF, DOCX, PPTX, images, and standalone videos into content-evidence IR. "
+            "Parse PDF, DOCX, PPTX, images, and standalone videos into ContentParseResult. "
             "Markdown and text are RAG-friendly projections; assets remain authenticated HTTP resources. "
             "Embedding, chunking, indexing, question answering, and domain extraction are downstream."
         ),
@@ -112,10 +112,10 @@ def create_mcp(runtime: Callable[[], Runtime], settings: Settings) -> McpBundle:
                     "delivery": "job",
                     **JobResponse.from_record(result).model_dump(mode="json", exclude_none=True),
                 }
-            response = result.evidence_ir
+            response = result.parse_result
             if response is None:
                 return _service_error(
-                    ServiceError("ir_missing", "content evidence IR was not produced")
+                    ServiceError("result_missing", "content parse result was not produced")
                 )
             serialized = response.model_dump_json()
             if len(serialized) <= settings.mcp_max_result_chars:
@@ -144,21 +144,21 @@ def create_mcp(runtime: Callable[[], Runtime], settings: Settings) -> McpBundle:
             return _service_error(exc)
 
     @server.tool()
-    async def get_content_evidence(job_id: str) -> dict[str, object]:
-        """Get completed content-evidence IR when small enough for MCP."""
+    async def get_content_result(job_id: str) -> dict[str, object]:
+        """Get a completed content parse result when small enough for MCP."""
 
         try:
-            evidence = await runtime().job_service.get_evidence(job_id)
-            if len(evidence.model_dump_json()) > settings.mcp_max_result_chars:
+            parse_result = await runtime().job_service.get_parse_result(job_id)
+            if len(parse_result.model_dump_json()) > settings.mcp_max_result_chars:
                 return {
                     "job_id": job_id,
                     "delivery": "http",
                     "result_url": f"/v1/content/jobs/{job_id}/result",
-                    "message": "The evidence IR exceeds the MCP inline limit.",
+                    "message": "The parse result exceeds the MCP inline limit.",
                 }
             return {
                 "delivery": "inline",
-                **evidence.model_dump(mode="json", exclude_none=True),
+                **parse_result.model_dump(mode="json", exclude_none=True),
             }
         except ServiceError as exc:
             return _service_error(exc)
@@ -196,11 +196,12 @@ def create_mcp(runtime: Callable[[], Runtime], settings: Settings) -> McpBundle:
         """List asset metadata and authenticated HTTP download URLs without base64 data."""
 
         try:
-            evidence = await runtime().job_service.get_evidence(job_id)
+            parse_result = await runtime().job_service.get_parse_result(job_id)
             return {
                 "job_id": job_id,
                 "assets": [
-                    asset.model_dump(mode="json", exclude_none=True) for asset in evidence.assets
+                    asset.model_dump(mode="json", exclude_none=True)
+                    for asset in parse_result.assets
                 ],
                 "bundle_url": f"/v1/content/jobs/{job_id}/bundle",
             }
@@ -236,7 +237,7 @@ def create_mcp(runtime: Callable[[], Runtime], settings: Settings) -> McpBundle:
             "- Use `profile=balanced` for ordinary documents and low latency.\n"
             "- Use `profile=accurate` when complex layouts need visual fusion.\n"
             "- Inputs are HTTP(S) URLs or base64 data; local filesystem paths are rejected.\n"
-            "- The primary output is content-evidence IR; Markdown and text are projections.\n"
+            "- The primary output is ContentParseResult; Markdown and text are projections.\n"
             "- Large media assets are authenticated HTTP downloads, never inline base64.\n"
             "- Entity, fact, relation, and event extraction are out of scope."
         )
@@ -247,8 +248,8 @@ def create_mcp(runtime: Callable[[], Runtime], settings: Settings) -> McpBundle:
 
         return (
             f"Parse the {content_kind} with MosaicParse. Use profile=balanced for ordinary "
-            "documents or profile=accurate for complex visual evidence. Return content-evidence "
-            "IR without asking this parser to embed, index, or extract domain facts."
+            "documents or profile=accurate for complex visual material. Return ContentParseResult "
+            "without asking this parser to embed, index, or extract domain facts."
         )
 
     transport_security = TransportSecuritySettings(

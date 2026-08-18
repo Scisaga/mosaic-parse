@@ -21,7 +21,7 @@ export function SplitWorkspace({ preview, result, resultAttention = false }: Spl
   const narrow = useNarrowScreen()
   const containerRef = useRef<HTMLDivElement>(null)
   const mobileTabRefs = useRef<Array<HTMLButtonElement | null>>([])
-  const [previewFraction, setPreviewFraction] = useState(50)
+  const [previewFraction, setPreviewFraction] = useState(44)
   const [mobileTab, setMobileTab] = useState<'preview' | 'result'>('preview')
 
   useEffect(() => {
@@ -43,7 +43,7 @@ export function SplitWorkspace({ preview, result, resultAttention = false }: Spl
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key === 'ArrowLeft') setPreviewFraction((value) => Math.max(28, value - 2))
     else if (event.key === 'ArrowRight') setPreviewFraction((value) => Math.min(72, value + 2))
-    else if (event.key === 'Home') setPreviewFraction(50)
+    else if (event.key === 'Home') setPreviewFraction(44)
     else return
     event.preventDefault()
   }
@@ -88,7 +88,7 @@ export function SplitWorkspace({ preview, result, resultAttention = false }: Spl
         tabIndex={0}
         onPointerDown={beginDrag}
         onPointerMove={(event) => event.currentTarget.hasPointerCapture(event.pointerId) && updateFromPointer(event.clientX)}
-        onDoubleClick={() => setPreviewFraction(50)}
+        onDoubleClick={() => setPreviewFraction(44)}
         onKeyDown={onKeyDown}
       ><span /></div>
       <div className="split-panel">{result}</div>

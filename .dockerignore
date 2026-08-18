@@ -21,5 +21,6 @@ benchmark-results
 pdf_sample
 tests
 docs
-scripts
+scripts/*
+!scripts/purge_job_data.py
 *.log

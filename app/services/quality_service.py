@@ -11,7 +11,7 @@ from app.models.parse_result import (
     PageParseResult,
     PageSourceKind,
     PageStatus,
-    ParseWarning,
+    PipelineWarning,
     QualitySummary,
     QualityVerdict,
     WarningSeverity,
@@ -23,7 +23,7 @@ from app.utils.settings import setting
 @dataclass(slots=True)
 class QualityAssessment:
     acceptable: bool
-    warnings: list[ParseWarning] = field(default_factory=list)
+    warnings: list[PipelineWarning] = field(default_factory=list)
 
 
 class QualityService:
@@ -42,14 +42,14 @@ class QualityService:
         self.replacement_ratio = float(setting(settings, "quality_max_replacement_ratio", 0.02))
         self.repeat_threshold = int(setting(settings, "quality_repeat_threshold", 5))
 
-    def inspect_page(self, page: PageParseResult) -> list[ParseWarning]:
+    def inspect_page(self, page: PageParseResult) -> list[PipelineWarning]:
         content = (page.content or "").strip()
-        warnings: list[ParseWarning] = []
+        warnings: list[PipelineWarning] = []
         if page.status == PageStatus.FAILED:
             return page.warnings
         if page.diagnostics and page.diagnostics.source_kind == PageSourceKind.SPARSE:
             warnings.append(
-                ParseWarning(
+                PipelineWarning(
                     code="intentional_sparse_page",
                     message="page is visually sparse and its short output agrees with the native PDF evidence",
                     severity=WarningSeverity.INFO,
@@ -63,7 +63,7 @@ class QualityService:
             )
         elif len(content) < self.min_page_characters:
             warnings.append(
-                ParseWarning(
+                PipelineWarning(
                     code="low_text_content",
                     message=f"page contains fewer than {self.min_page_characters} non-whitespace characters",
                     page_number=page.page_number,
@@ -74,7 +74,7 @@ class QualityService:
             replacements = content.count("\ufffd")
             if replacements / len(content) > self.replacement_ratio:
                 warnings.append(
-                    ParseWarning(
+                    PipelineWarning(
                         code="high_replacement_character_ratio",
                         message="page contains an unusually high Unicode replacement-character ratio",
                         page_number=page.page_number,
@@ -105,7 +105,7 @@ class QualityService:
             ]
             if repeated:
                 warnings.append(
-                    ParseWarning(
+                    PipelineWarning(
                         code="repeated_text",
                         message="page contains an abnormally repeated short fragment",
                         page_number=page.page_number,
@@ -135,7 +135,7 @@ class QualityService:
             unanchored_count = sum((table_numbers & outside_numbers).values())
             if rows and unanchored_count:
                 warnings.append(
-                    ParseWarning(
+                    PipelineWarning(
                         code="unanchored_table_numbers",
                         message="numbers emitted outside a table are duplicated inside table cells",
                         page_number=page.page_number,
@@ -158,7 +158,7 @@ class QualityService:
                 ]
                 if populated and max(Counter(populated).values()) >= self.repeat_threshold:
                     warnings.append(
-                        ParseWarning(
+                        PipelineWarning(
                             code="table_header_propagation",
                             message="a table row repeats the same non-empty cell across too many columns",
                             page_number=page.page_number,
@@ -168,7 +168,7 @@ class QualityService:
                     break
             if rows and max(row.count("|") - 1 for row in rows) > 24:
                 warnings.append(
-                    ParseWarning(
+                    PipelineWarning(
                         code="table_shape_explosion",
                         message="a rendered table has an implausibly large number of columns",
                         page_number=page.page_number,
@@ -178,7 +178,7 @@ class QualityService:
         diagnostics = page.diagnostics
         if diagnostics and diagnostics.detected_rotation_degrees in {90, 180, 270}:
             warnings.append(
-                ParseWarning(
+                PipelineWarning(
                     code="rotated_scan",
                     message="page image content requires orientation normalization before reliable OCR",
                     severity=WarningSeverity.INFO,
@@ -195,7 +195,7 @@ class QualityService:
             and len(re.sub(r"\s+", "", content)) < diagnostics.native_text_characters * 0.20
         ):
             warnings.append(
-                ParseWarning(
+                PipelineWarning(
                     code="visual_text_mismatch",
                     message="parsed output contains far less text than the measured native PDF layer",
                     page_number=page.page_number,
@@ -218,12 +218,12 @@ class QualityService:
         ]
 
     def assess(self, result: DocumentParseResult) -> QualityAssessment:
-        warnings: list[ParseWarning] = []
+        warnings: list[PipelineWarning] = []
         for page in result.pages:
             if page.status != PageStatus.FAILED and not (page.content or "").strip():
                 if not any(warning.code == "no_usable_content" for warning in page.warnings):
                     page.warnings.append(
-                        ParseWarning(
+                        PipelineWarning(
                             code="no_usable_content",
                             message="page has no usable parsed content",
                             severity=WarningSeverity.ERROR,

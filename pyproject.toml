@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mosaicparse"
-version = "0.3.0"
-description = "Self-hosted multimodal content evidence parser for external RAG systems"
+version = "0.4.0"
+description = "Self-hosted multimodal content parser for external RAG systems"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 license = "Apache-2.0"

@@ -36,7 +36,7 @@ class Settings(BaseSettings):
 
     app_name: str = "MosaicParse"
     app_id: str = "mosaicparse"
-    version: str = "0.3.0"
+    version: str = "0.4.0"
     host: str = "0.0.0.0"
     port: int = Field(default=12303, ge=1, le=65535)
     tz: str = "Asia/Shanghai"

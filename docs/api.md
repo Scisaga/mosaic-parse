@@ -1,7 +1,7 @@
 # MosaicParse HTTP 与 MCP 契约
 
 默认 Base URL 为 `http://localhost:12303`。在线定义以 `/openapi.json`、`/docs`
-和 `/redoc` 为准。MosaicParse 只产出可追溯内容证据和派生渲染，不执行
+和 `/redoc` 为准。MosaicParse 只产出可追溯解析结果和派生渲染，不执行
 Embedding、切块、索引、问答或领域实体抽取。
 
 ## 认证
@@ -50,21 +50,21 @@ curl --fail-with-body http://localhost:12303/v1/content/parse \
   -F description_language=zh-CN
 ```
 
-小型 PDF、图片、DOCX 和 PPTX 返回 HTTP 200 `ContentEvidenceIR`，同时仍创建
+小型 PDF、图片、DOCX 和 PPTX 返回 HTTP 200 `ContentParseResult`，同时仍创建
 保留 24 小时的持久 Job。独立视频、`prefer_async=true`、超过同步字节或单元限制
 的输入返回 HTTP 202 `JobResponse`。因此调用方必须同时处理 200 与 202。
 
 `POST /v1/content/jobs` 始终返回 202。视频只分析采样帧，不提取音轨，也不做
 ASR。文档内嵌视频完全忽略；文档内嵌图片会成为资产。
 
-## ContentEvidenceIR 1.0
+## ContentParseResult 1.0
 
 主结果的固定标识是：
 
 ```json
 {
-  "object": "content.evidence",
-  "schema_version": "content-evidence/1.0",
+  "object": "content.parse_result",
+  "schema_version": "content-parse-result/1.0",
   "status": "completed",
   "source": {
     "content_id": "job_...",
@@ -97,16 +97,16 @@ ASR。文档内嵌视频完全忽略；文档内嵌图片会成为资产。
 
 `units[].unit_type` 是 `page`、`slide`、`document_body`、`image` 或 `video`。
 每个单元可含 regions、blocks、tables 引用、asset 引用、渲染与实测诊断。表格
-单元格保留 row/column、span、bbox、所选文本、证据来源和 reason code。
+单元格保留 row/column、span、bbox、所选文本、来源追踪和 reason code。
 
 独立图片的结构化说明位于顶层 `visual_analysis`，并同时附在源图片资产上；文档
 图片说明位于对应 `assets[].visual_analysis`。重复图片以 SHA256 去重，多个出现位置
 记录在 `locations[]`。`mixed` 图片同时保留文档结构与视觉描述。
 
 `video_analysis` 包含实测时长/尺寸/编码、场景区间和单调关键帧时间戳。摘要只能
-声称采样帧可见的内容；`visual_only=true` 明确表示没有音频证据。
+声称采样帧可见的内容；`visual_only=true` 明确表示没有分析音频。
 
-`include_renderings=false` 只清空顶层和单元级 Markdown/Text，证据结构、图片描述、
+`include_renderings=false` 只清空顶层和单元级 Markdown/Text，解析结构、图片描述、
 关键帧、诊断和告警仍保留。未知测量使用 `null`，不能以零冒充测量值。
 
 ## Job、SSE 与结果
@@ -134,8 +134,8 @@ SSE 进度单位可能为 `page`、`slide`、`asset` 或 `frame`。SSE 是增量
 应重新读取 Job 状态。`partial` 表示父内容可用但至少一项非致命媒体处理失败，例如
 文档图片的 VLM 不可用。纯视觉独立图片/视频缺少 VLM 时整个任务失败。
 
-旧 Job 文件保留到原过期时间，但旧 IR 不转换；读取旧结果返回 409
-`legacy_result_contract`。
+0.4.0 升级会按受保护清理流程删除旧 Job；若意外恢复旧结果文件，读取时返回 409
+`legacy_result_contract`，不会静默转换。
 
 ## 资产与 bundle
 
@@ -159,7 +159,7 @@ ETag。bundle 按需原子生成并缓存，包含 `manifest.json` 和所有可�
 
 - `parse_content`
 - `get_content_job`
-- `get_content_evidence`
+- `get_content_result`
 - `get_content_rendering`
 - `get_content_assets`
 

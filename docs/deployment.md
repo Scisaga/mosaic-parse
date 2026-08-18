@@ -214,9 +214,29 @@ wheels; it does not install CUDA libraries into the parser environment.
 ## Data, upgrades, and cleanup
 
 Compose uses named volumes `mosaicparse-data`, `docling-models`, and
-`huggingface-cache`. Back up `mosaicparse-data` before upgrades. Do not use
-`docker compose down -v` unless deleting jobs, results, and model caches is
-intentional.
+`huggingface-cache`. Do not use `docker compose down -v` unless deleting jobs,
+results, and model caches is intentional.
+
+0.4.0 intentionally does not convert older Job results. For the breaking upgrade,
+stop the main service and run the guarded purge command with the exact confirmation
+string. It deletes Job rows, inputs, results, media, keyframes, bundles and legacy
+`jobs.sqlite3`, while preserving the current `jobs.db` schema and model volumes:
+
+```bash
+docker compose stop mosaicparse
+docker run --rm --network mosaicparse_default \
+  -v mosaicparse-data:/data \
+  ghcr.io/scisaga/mosaic-parse:0.4.0 \
+  python /app/scripts/purge_job_data.py \
+  --health-url http://mosaicparse:12303/health \
+  --data-dir /data \
+  --confirm PURGE_MOSAICPARSE_JOBS_0_4_0
+```
+
+The command rejects a running service, root/relative/symlink targets and an incorrect
+confirmation string, reports deletion counts, and can be rerun idempotently. This
+upgrade has no Job backup or data rollback; back up the data volume yourself before
+running it if that is required by your deployment policy.
 
 Expired jobs can be removed through the protected admin API:
 

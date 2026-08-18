@@ -11,10 +11,12 @@ describe('desktop control deck layout contract', () => {
 })
 
 describe('result rendering contract', () => {
-  it('uses CJK-safe UI and data fonts with a lightweight evidence overview', () => {
+  it('uses CJK-safe UI and data fonts with a lightweight result overview', () => {
     expect(styles).toContain('--font-ui: "Noto Sans CJK SC"')
     expect(styles).toContain('--font-data: "Noto Sans Mono CJK SC"')
     expect(styles).toContain('font-family: var(--font-ui)')
-    expect(styles).toContain('.evidence-overview')
+    expect(styles).toContain('.result-overview')
+    expect(styles).toContain('max-width: 1920px')
+    expect(styles).toContain('minmax(330px, 36fr) minmax(620px, 64fr)')
   })
 })

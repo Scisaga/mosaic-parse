@@ -16,10 +16,10 @@ from app.services.table_service import TableCellFragment, TableFragment, render_
 from app.services.visual_fusion_service import VisualPageIR, VisualSignatureExtraction
 
 
-def test_document_ir_preserves_spans_provenance_and_non_body_visual_evidence(
+def test_content_result_preserves_spans_provenance_and_non_body_visual_material(
     tmp_path: Path,
 ) -> None:
-    source_path = tmp_path / "evidence.pdf"
+    source_path = tmp_path / "result.pdf"
     source_path.write_bytes(b"stable fixture bytes")
     source = StoredSource(
         path=source_path,
@@ -100,7 +100,7 @@ def test_document_ir_preserves_spans_provenance_and_non_body_visual_evidence(
             has_handwriting=True,
         ),
     )
-    evidence = PageEvidence(
+    page_evidence = PageEvidence(
         page_number=1,
         source_kind=PageSourceKind.MIXED,
         native_blocks=[
@@ -111,23 +111,23 @@ def test_document_ir_preserves_spans_provenance_and_non_body_visual_evidence(
         page_height=100,
     )
 
-    ir = DocumentIRService().build(result, source, {1: evidence})
+    parse_result = DocumentIRService().build(result, source, {1: page_evidence})
 
-    assert ir.object == "content.evidence"
-    assert ir.schema_version == "content-evidence/1.0"
-    assert [block.text for block in ir.units[0].blocks] == ["报告", "李四"]
-    assert {region.region_type.value for region in ir.units[0].regions} >= {
+    assert parse_result.object == "content.parse_result"
+    assert parse_result.schema_version == "content-parse-result/1.0"
+    assert [block.text for block in parse_result.units[0].blocks] == ["报告", "李四"]
+    assert {region.region_type.value for region in parse_result.units[0].regions} >= {
         "heading",
         "table",
         "seal",
         "handwriting",
     }
-    merged_header = next(cell for cell in ir.tables[0].cells if cell.text == "金额")
+    merged_header = next(cell for cell in parse_result.tables[0].cells if cell.text == "金额")
     assert merged_header.column_span == 2
     assert merged_header.quality.value == "confirmed"
-    amount = next(cell for cell in ir.tables[0].cells if cell.text == "100")
-    assert amount.evidence.selected_source.value in {"glm", "qwen"}
-    assert set(amount.evidence.supporting_sources) == {"glm", "qwen"}
-    handwriting = next(block for block in ir.units[0].blocks if block.text == "李四")
-    assert handwriting.evidence.selected_source.value == "qwen"
-    assert handwriting.evidence.reason_codes == ["visual_only_handwriting"]
+    amount = next(cell for cell in parse_result.tables[0].cells if cell.text == "100")
+    assert amount.provenance.selected_source.value in {"glm", "qwen"}
+    assert set(amount.provenance.supporting_sources) == {"glm", "qwen"}
+    handwriting = next(block for block in parse_result.units[0].blocks if block.text == "李四")
+    assert handwriting.provenance.selected_source.value == "qwen"
+    assert handwriting.provenance.reason_codes == ["visual_only_handwriting"]

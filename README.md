@@ -4,12 +4,12 @@
 
 # MosaicParse
 
-供外部 RAG 系统调用的自托管多模态内容证据解析微服务。
+供外部 RAG 系统调用的自托管多模态内容解析微服务。
 
 MosaicParse 解析 PDF、DOCX、PPTX、常见图片与独立视频。图片会按实测布局/OCR
 信号路由至文档解析或 VLM 描述；视频通过 FFmpeg 采样关键帧，并明确限制摘要只基于
 采样内容。文档内嵌图片作为可下载资产返回，文档内嵌视频则完全忽略。主产物是版本化
-`ContentEvidenceIR`，Markdown / Plain Text 是方便 RAG 消费的派生视图。
+`ContentParseResult`，Markdown / Plain Text 是方便 RAG 消费的派生视图。
 
 > MosaicParse is an independent community project and is not affiliated with
 > or endorsed by the Docling or GLM-OCR projects. Docling 与 GLM-OCR 名称及
@@ -23,7 +23,7 @@ MosaicParse 解析 PDF、DOCX、PPTX、常见图片与独立视频。图片会�
 
 ## 项目边界
 
-本项目只负责“内容中可见了什么、位于哪里、结构如何、证据来自哪个解析器”。
+本项目只负责“内容中可见了什么、位于哪里、结构如何、解析结果来自哪个后端”。
 它不负责 Embedding、切块策略、索引、问答、实体关系或领域结论。
 
 ## 功能
@@ -31,7 +31,7 @@ MosaicParse 解析 PDF、DOCX、PPTX、常见图片与独立视频。图片会�
 - PDF、DOCX、PPTX、PNG、JPEG、WebP、TIFF、BMP 及 MP4、MOV、MKV、WebM、AVI；
 - 文档内嵌图片提取、去重、描述与下载；独立视频关键帧和仅基于采样帧的摘要；
 - `fast`、`balanced`、`accurate` 三个质量档位，服务自动路由；
-- 版本化证据 IR，包含区域、表格、单元格 span、来源与质量原因；
+- 版本化解析结果，包含区域、表格、单元格 span、来源追踪与质量原因；
 - 可选 Markdown / Plain Text 派生视图，支持页码范围与结果下载；
 - 小文件同步解析，异步 Job、持久化状态和 SSE 进度；
 - `/health`、`/ready`、后端能力探测、Swagger、ReDoc；
@@ -110,7 +110,7 @@ Compose 将 GPU `device_ids` 默认锁到 `1`。参考主机的 GPU 1 是 RTX 20
 ### GLM SDK＋Qwen 区域视觉融合
 
 `docling-glm-ocr` 插件和官方 `glmocr` SDK 复用同一个 GLM-OCR 识别模型。SDK
-sidecar 在 CPU 上运行 PP-DocLayoutV3，将布局、区域和 OCR 原值作为视觉证据；Qwen
+sidecar 在 CPU 上运行 PP-DocLayoutV3，将布局、区域和 OCR 原值用于来源追踪；Qwen
 负责区域语义、表格拓扑、行列归属、可见值读取和冲突裁决。结果按区域和单元格组装，
 不会用 table-only 候选覆盖整页正文、图片占位或跨页表元数据。
 
@@ -165,7 +165,7 @@ curl --fail http://localhost:12303/v1/backends
 | `POST` | `/v1/content/jobs` | 创建异步任务 |
 | `GET` | `/v1/content/jobs/{job_id}` | 查询持久化状态 |
 | `GET` | `/v1/content/jobs/{job_id}/events` | SSE 进度 |
-| `GET` | `/v1/content/jobs/{job_id}/result` | 获取/下载 ContentEvidenceIR JSON |
+| `GET` | `/v1/content/jobs/{job_id}/result` | 获取/下载 ContentParseResult JSON |
 | `GET` | `/v1/content/jobs/{job_id}/rendering/{format}` | 获取派生 Markdown 或 Text |
 | `GET` | `/v1/content/jobs/{job_id}/assets` | 列出图片、视频与关键帧资产 |
 | `GET` | `/v1/content/jobs/{job_id}/assets/{asset_id}` | 鉴权下载资产；视频支持 Range |
@@ -196,7 +196,7 @@ X-Admin-Token: <ADMIN_TOKEN>
 
 ## MCP
 
-MCP 使用 Python SDK 2.x 的 Streamable HTTP 传输，暴露解析、任务状态、证据 IR
+MCP 使用 Python SDK 2.x 的 Streamable HTTP 传输，暴露解析、任务状态、解析结果
 和派生渲染工具。大文件使用受控 `source_url`；MCP 不接受任意本地文件路径。
 
 MCP v2 会校验 Host 和 Origin 防止 DNS rebinding。通过公网域名/反向代理
@@ -270,7 +270,7 @@ CI 不下载或运行大模型；GLM/Ollama 错误路径由 mock 服务覆盖。
 - [API](docs/api.md)
 - [部署](docs/deployment.md)
 - [基准测试](docs/benchmark.md)
-- [项目 0.3.0 设计规格](docs/project-spec.md)
+- [项目 0.4.0 设计规格](docs/project-spec.md)
 
 本项目代码使用 [Apache License 2.0](LICENSE)。Docling、GLM-OCR、模型权重
 和容器镜像拥有各自许可证；部署者需要分别核查并遵守其版本对应条款。

@@ -65,8 +65,8 @@ def test_sync_parse_health_backends_and_ready(tmp_path: Path, native_pdf: Path) 
         )
         assert response.status_code == 200, response.text
         parsed = response.json()
-        assert parsed["object"] == "content.evidence"
-        assert parsed["schema_version"] == "content-evidence/1.0"
+        assert parsed["object"] == "content.parse_result"
+        assert parsed["schema_version"] == "content-parse-result/1.0"
         assert parsed["status"] == "completed"
         assert parsed["renderings"]["markdown"] == "# Page 1\n\nValue: 12,345.67"
         assert parsed["units"][0]["blocks"][0]["text"].startswith("# Page 1")
@@ -104,7 +104,7 @@ def test_profile_is_the_only_public_visual_routing_control(
         assert removed.json()["error"]["details"]["fields"] == ["mode", "vlm_policy"]
 
 
-def test_include_renderings_false_keeps_evidence_and_hides_only_derived_views(
+def test_include_renderings_false_keeps_result_and_hides_only_derived_views(
     tmp_path: Path,
     native_pdf: Path,
 ) -> None:
@@ -140,10 +140,10 @@ def test_async_job_sse_results_and_delete(tmp_path: Path, native_pdf: Path) -> N
         assert "pages" not in completed
         assert "pipeline" not in completed
 
-        evidence = client.get(job["result_url"])
-        assert evidence.status_code == 200
-        assert evidence.json()["object"] == "content.evidence"
-        assert "12,345.67" in evidence.json()["renderings"]["markdown"]
+        parse_result = client.get(job["result_url"])
+        assert parse_result.status_code == 200
+        assert parse_result.json()["object"] == "content.parse_result"
+        assert "12,345.67" in parse_result.json()["renderings"]["markdown"]
 
         downloaded = client.get(f"/v1/content/jobs/{job['id']}/rendering/text?download=true")
         assert downloaded.headers["content-disposition"].startswith("attachment;")
@@ -284,6 +284,35 @@ def test_legacy_document_routes_are_not_registered(tmp_path: Path) -> None:
         assert client.get("/v1/documents/jobs/legacy").status_code == 404
 
 
+def test_openapi_exposes_only_the_parse_result_contract(tmp_path: Path) -> None:
+    app = create_app(make_test_settings(tmp_path), runtime_factory=fake_runtime)
+    with TestClient(app) as client:
+        document = client.get("/openapi.json").json()
+
+    schemas = document["components"]["schemas"]
+    expected = {
+        "ContentParseResult",
+        "ContentAsset",
+        "ContentUnit",
+        "ContentRegion",
+        "TextBlock",
+        "ParsedTable",
+        "TableCell",
+        "ElementProvenance",
+        "ProvenanceSource",
+        "ParseWarning",
+        "VisualAnalysis",
+        "VideoAnalysis",
+    }
+    assert expected <= schemas.keys()
+    assert not any(name.endswith("IR") for name in schemas)
+    assert "provenance" in schemas["TextBlock"]["properties"]
+    assert "evidence" not in schemas["TextBlock"]["properties"]
+    serialized = json.dumps(document, ensure_ascii=False)
+    assert "ContentEvidenceIR" not in serialized
+    assert "get_content_evidence" not in serialized
+
+
 def test_authenticated_asset_range_bundle_checksum_and_cleanup(
     tmp_path: Path, native_pdf: Path
 ) -> None:
@@ -305,8 +334,8 @@ def test_authenticated_asset_range_bundle_checksum_and_cleanup(
         asset_path.write_bytes(media)
 
         result_path = tmp_path / "jobs" / job_id / "output" / "result.json"
-        evidence = json.loads(result_path.read_text())
-        evidence["assets"].append(
+        parse_result = json.loads(result_path.read_text())
+        parse_result["assets"].append(
             {
                 "asset_id": asset_id,
                 "kind": "video",
@@ -319,14 +348,14 @@ def test_authenticated_asset_range_bundle_checksum_and_cleanup(
                 "height": 360,
                 "duration_ms": 6000,
                 "parent_asset_id": None,
-                "locations": [{"unit_id": evidence["units"][0]["unit_id"]}],
+                "locations": [{"unit_id": parse_result["units"][0]["unit_id"]}],
                 "visual_analysis": None,
                 "status": "ready",
                 "warning_codes": [],
                 "download_url": f"/v1/content/jobs/{job_id}/assets/{asset_id}",
             }
         )
-        result_path.write_text(json.dumps(evidence), encoding="utf-8")
+        result_path.write_text(json.dumps(parse_result), encoding="utf-8")
 
         assert client.get(f"/v1/content/jobs/{job_id}/assets").status_code == 401
         listed = client.get(f"/v1/content/jobs/{job_id}/assets", headers=headers)
@@ -354,7 +383,8 @@ def test_authenticated_asset_range_bundle_checksum_and_cleanup(
         with zipfile.ZipFile(io.BytesIO(bundle.content)) as archive:
             manifest = json.loads(archive.read("manifest.json"))
             archived = archive.read(f"assets/{asset_id}/scene-switch.mp4")
-        assert manifest["schema_version"] == "content-evidence/1.0"
+        assert manifest["object"] == "content.parse_result"
+        assert manifest["schema_version"] == "content-parse-result/1.0"
         assert manifest["assets"][0]["sha256"] == digest
         assert hashlib.sha256(archived).hexdigest() == digest
 

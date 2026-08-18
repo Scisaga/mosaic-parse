@@ -175,11 +175,11 @@ export async function getContentJob(jobId: string): Promise<ContentJob> {
 
 export async function getContentResult(jobId: string): Promise<ResultBundle> {
   const response = await request(`/v1/content/jobs/${encodeURIComponent(jobId)}/result`)
-  const evidence = await response.json() as ParseResult
+  const result = await response.json() as ParseResult
   return {
-    evidence,
-    markdown: evidence.renderings.markdown,
-    text: evidence.renderings.plain_text,
+    result,
+    markdown: result.renderings.markdown,
+    text: result.renderings.plain_text,
   }
 }
 

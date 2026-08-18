@@ -29,7 +29,7 @@ from app.models.parse_result import (
     PageStatus,
     ParsePipeline,
     ParseUsage,
-    ParseWarning,
+    PipelineWarning,
     RouteSummary,
     WarningSeverity,
 )
@@ -452,12 +452,12 @@ class GlmSdkRemoteParser(DocumentParser):
                     markdown = re.sub(
                         r"!\[[^\]]*\]\([^)]*\)", "<!-- image -->", markdown_result
                     ).strip()
-            warnings: list[ParseWarning] = []
+            warnings: list[PipelineWarning] = []
             status = PageStatus.COMPLETED
             if not markdown:
                 status = PageStatus.FAILED
                 warnings.append(
-                    ParseWarning(
+                    PipelineWarning(
                         code="glm_sdk_empty_page",
                         message="the official GLM-OCR SDK returned no usable page content",
                         severity=WarningSeverity.ERROR,
@@ -488,7 +488,7 @@ class GlmSdkRemoteParser(DocumentParser):
                     backend=self.name,
                     duration_ms=max(0, round((time.perf_counter() - started) * 1_000)),
                     warnings=[
-                        ParseWarning(
+                        PipelineWarning(
                             code=code,
                             message="the official GLM-OCR SDK page candidate could not be produced",
                             severity=WarningSeverity.ERROR,
@@ -544,7 +544,7 @@ class GlmSdkRemoteParser(DocumentParser):
                             max(0, round(self.timeout * 1_000)),
                         ),
                         warnings=[
-                            ParseWarning(
+                            PipelineWarning(
                                 code="glm_sdk_timeout",
                                 message=(
                                     "the official GLM-OCR SDK page candidate exceeded "
@@ -583,7 +583,7 @@ class GlmSdkRemoteParser(DocumentParser):
                             backend=self.name,
                             duration_ms=0,
                             warnings=[
-                                ParseWarning(
+                                PipelineWarning(
                                     code="glm_sdk_skipped_after_timeout",
                                     message=(
                                         "the official GLM-OCR SDK page candidate was skipped "

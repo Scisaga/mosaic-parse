@@ -88,7 +88,7 @@ def create_app(
 
     application = FastAPI(
         title="MosaicParse",
-        summary="Self-hosted multimodal content evidence parser for external RAG systems",
+        summary="Self-hosted multimodal content parser for external RAG systems",
         description=(
             "An independent multimodal parsing service with Docling, optional GLM-OCR, and VLM "
             "backends. It produces evidence and assets, but does not perform embedding, chunking, "

@@ -22,7 +22,7 @@ async def test_mcp_tools_resources_and_prompt(tmp_path: Path, native_pdf: Path) 
             assert {tool.name for tool in tools.tools} == {
                 "parse_content",
                 "get_content_job",
-                "get_content_evidence",
+                "get_content_result",
                 "get_content_rendering",
                 "get_content_assets",
             }
@@ -38,7 +38,7 @@ async def test_mcp_tools_resources_and_prompt(tmp_path: Path, native_pdf: Path) 
             assert result.is_error is False
             assert result.structured_content is not None
             assert result.structured_content["delivery"] == "inline"
-            assert result.structured_content["object"] == "content.evidence"
+            assert result.structured_content["object"] == "content.parse_result"
             assert "12,345.67" in result.structured_content["renderings"]["markdown"]
             assert runtime.parser_service.last_options is not None
             assert runtime.parser_service.last_options.resolved_vlm_policy.value == "auto_visual"
@@ -66,7 +66,7 @@ async def test_mcp_tools_resources_and_prompt(tmp_path: Path, native_pdf: Path) 
                 {"content_kind": "scanned statement"},
             )
             assert "profile=accurate" in prompt.messages[0].content.text
-            assert "content-evidence IR" in prompt.messages[0].content.text
+            assert "ContentParseResult" in prompt.messages[0].content.text
     finally:
         await runtime.close()
 

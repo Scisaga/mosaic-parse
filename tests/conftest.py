@@ -18,7 +18,7 @@ from app.models import (
     PageSourceKind,
     ParsePipeline,
     ParseUsage,
-    ParseWarning,
+    PipelineWarning,
     QualitySummary,
     RouteSummary,
     ServiceError,
@@ -99,7 +99,7 @@ class FakeParserService:
                     plain_text=f"Page {page_number}\n\nValue: 12,345.67",
                     duration_ms=1,
                     warnings=[
-                        ParseWarning(
+                        PipelineWarning(
                             code="fixture_info",
                             message="fixture diagnostic",
                             severity="info",
@@ -130,7 +130,7 @@ class FakeParserService:
             ),
             route_summary=RouteSummary(native_text_pages=len(pages), failed_pages=0),
             warnings=[
-                ParseWarning(
+                PipelineWarning(
                     code="fixture_info",
                     message="fixture diagnostic",
                     severity="info",
@@ -139,11 +139,11 @@ class FakeParserService:
             quality_summary=QualitySummary(trusted_pages=len(pages)),
             usage=ParseUsage(input_bytes=source.size_bytes, duration_ms=2),
         )
-        parsed.evidence_ir = DocumentIRService().build(parsed, source, {})
+        parsed.parse_result = DocumentIRService().build(parsed, source, {})
         if not options.include_renderings:
-            parsed.evidence_ir.renderings.markdown = ""
-            parsed.evidence_ir.renderings.plain_text = ""
-            for page in parsed.evidence_ir.units:
+            parsed.parse_result.renderings.markdown = ""
+            parsed.parse_result.renderings.plain_text = ""
+            for page in parsed.parse_result.units:
                 page.renderings.markdown = ""
                 page.renderings.plain_text = ""
         return parsed

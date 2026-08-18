@@ -11,13 +11,13 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.models import ContentParseOptions, StoredSource
-from app.models.document_ir import (
+from app.models.content_result import (
     AssetKind,
-    AssetLocationIR,
+    AssetLocation,
     AssetRole,
     SourceKind,
     UnitType,
-    VisualAnalysisIR,
+    VisualAnalysis,
     VisualClassification,
 )
 from app.models.parse_result import PageSourceKind
@@ -83,8 +83,16 @@ def test_raster_routing_uses_completed_ocr_when_pdf_metrics_do_not_exist(
 @pytest.mark.parametrize(
     ("language", "expected"),
     [
-        ("zh-CN", "Use Simplified Chinese."),
-        ("en", "Use English."),
+        (
+            "zh-CN",
+            "Write every natural-language output field in Simplified Chinese and set "
+            "the language field to zh-CN. Do not answer in English.",
+        ),
+        (
+            "en",
+            "Write every natural-language output field in English and set the "
+            "language field to en.",
+        ),
         ("auto", "Use the main language visible in the image or sampled frames."),
     ],
 )
@@ -138,7 +146,7 @@ async def test_embedded_video_relationship_is_never_processed_as_video(
     assert all(not item.filename.endswith(".mp4") for item in extracted)
 
     describe = AsyncMock(
-        return_value=VisualAnalysisIR(
+        return_value=VisualAnalysis(
             classification=VisualClassification.VISUAL,
             summary="演示文稿中的静态海报图像",
             language="zh-CN",
@@ -163,15 +171,15 @@ async def test_embedded_video_relationship_is_never_processed_as_video(
         cancel_event=None,
     )
 
-    assert result.evidence_ir is not None
-    evidence = result.evidence_ir
-    assert evidence.source.kind == SourceKind.PPTX
-    assert evidence.source.slide_count == 1
-    assert evidence.units[0].unit_type == UnitType.SLIDE
-    assert evidence.units[0].blocks
-    assert evidence.assets
-    assert all(asset.kind == AssetKind.IMAGE for asset in evidence.assets)
-    assert all("video" not in warning.code for warning in evidence.warnings)
+    assert result.parse_result is not None
+    parse_result = result.parse_result
+    assert parse_result.source.kind == SourceKind.PPTX
+    assert parse_result.source.slide_count == 1
+    assert parse_result.units[0].unit_type == UnitType.SLIDE
+    assert parse_result.units[0].blocks
+    assert parse_result.assets
+    assert all(asset.kind == AssetKind.IMAGE for asset in parse_result.assets)
+    assert all("video" not in warning.code for warning in parse_result.warnings)
     assert multimodal._run_process.await_count == 0  # type: ignore[attr-defined]
     assert describe.await_count == 1
 
@@ -190,7 +198,7 @@ async def test_office_duplicate_images_are_analyzed_once(tmp_path: Path) -> None
     document.add_picture(str(image), width=Inches(2))
     document.save(path)
     describe = AsyncMock(
-        return_value=VisualAnalysisIR(
+        return_value=VisualAnalysis(
             classification=VisualClassification.VISUAL,
             summary="静态插图",
             language="zh-CN",
@@ -212,9 +220,9 @@ async def test_office_duplicate_images_are_analyzed_once(tmp_path: Path) -> None
         progress_callback=None,
         cancel_event=None,
     )
-    assert result.evidence_ir is not None
-    assert len(result.evidence_ir.assets) == 1
-    assert len(result.evidence_ir.assets[0].locations) == 2
+    assert result.parse_result is not None
+    assert len(result.parse_result.assets) == 1
+    assert len(result.parse_result.assets[0].locations) == 2
     assert describe.await_count == 1
 
 
@@ -245,12 +253,12 @@ async def test_office_document_image_uses_child_document_path_without_vlm(
         image_parser=child_parser,  # type: ignore[arg-type]
     )
 
-    assert result.evidence_ir is not None
-    analysis = result.evidence_ir.assets[0].visual_analysis
+    assert result.parse_result is not None
+    analysis = result.parse_result.assets[0].visual_analysis
     assert analysis is not None
     assert analysis.classification == VisualClassification.DOCUMENT
     assert analysis.visible_text == visible_text
-    assert visible_text in result.evidence_ir.renderings.plain_text
+    assert visible_text in result.parse_result.renderings.plain_text
     assert child_parser.parse.await_count == 1
     assert describe.await_count == 0
 
@@ -277,15 +285,15 @@ async def test_embedded_image_vlm_failure_returns_partial_with_original_asset(
         cancel_event=None,
     )
 
-    assert result.evidence_ir is not None
-    evidence = result.evidence_ir
-    assert evidence.status == "partial"
-    assert len(evidence.assets) == 1
-    assert evidence.assets[0].status.value == "failed"
+    assert result.parse_result is not None
+    parse_result = result.parse_result
+    assert parse_result.status == "partial"
+    assert len(parse_result.assets) == 1
+    assert parse_result.assets[0].status.value == "failed"
     assert multimodal.storage.asset_path(
-        "job_partial_docx", evidence.assets[0].asset_id
+        "job_partial_docx", parse_result.assets[0].asset_id
     ) is not None
-    assert [warning.code for warning in evidence.warnings] == [
+    assert [warning.code for warning in parse_result.warnings] == [
         "embedded_image_analysis_failed"
     ]
 
@@ -335,7 +343,7 @@ async def test_missing_media_tool_is_reported_as_backend_unavailable(tmp_path: P
 async def test_tiff_keeps_original_bytes_and_adds_png_preview(tmp_path: Path) -> None:
     multimodal = service(tmp_path)
     content = Path("tests/fixtures/natural-scene.tiff").read_bytes()
-    location = AssetLocationIR(unit_id="unit-1", page_number=1)
+    location = AssetLocation(unit_id="unit-1", page_number=1)
     original, _ = await multimodal._persist_image_asset(
         "job_tiff",
         content,
@@ -415,10 +423,10 @@ async def test_real_ffmpeg_video_pipeline_produces_bounded_keyframe_evidence(
         cancel_event=None,
     )
 
-    assert result.evidence_ir is not None
-    evidence = result.evidence_ir
-    assert evidence.video_analysis is not None
-    video = evidence.video_analysis
+    assert result.parse_result is not None
+    parse_result = result.parse_result
+    assert parse_result.video_analysis is not None
+    video = parse_result.video_analysis
     timestamps = [frame.timestamp_ms for frame in video.keyframes]
     assert 1 <= len(timestamps) <= 6
     assert timestamps == sorted(timestamps)
@@ -427,7 +435,7 @@ async def test_real_ffmpeg_video_pipeline_produces_bounded_keyframe_evidence(
     assert video.summary == "Summary based only on the sampled test frames."
     assert all(state == "frame.processed" for _, _, state in progress)
     assert progress[-1][:2] == (len(timestamps), len(timestamps))
-    for asset in evidence.assets:
+    for asset in parse_result.assets:
         stored = multimodal.storage.asset_path("job_real_video", asset.asset_id)
         assert stored is not None
         assert hashlib.sha256(stored.read_bytes()).hexdigest() == asset.sha256

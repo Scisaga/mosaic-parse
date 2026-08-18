@@ -13,15 +13,15 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.models import (
     BackendStatus,
-    ContentEvidenceIR,
     ContentParseOptions,
+    ContentParseResult,
     JobError,
     JobProgress,
     JobRecord,
     JobStatus,
 )
 
-ParseResponse = ContentEvidenceIR
+ParseResponse = ContentParseResult
 
 
 class JobResponse(BaseModel):

@@ -21,7 +21,7 @@ from app.models.parse_result import (
     PageParseResult,
     PageSourceKind,
     PageStatus,
-    ParseWarning,
+    PipelineWarning,
     SelectionStrategy,
     WarningSeverity,
 )
@@ -546,7 +546,7 @@ class ParserService:
             repaired_pages.append(page.page_number)
         if repaired_pages:
             result.warnings.append(
-                ParseWarning(
+                PipelineWarning(
                     code="split_heading_repaired",
                     message=f"native line evidence rejoined split headings on {len(repaired_pages)} page(s)",
                     severity=WarningSeverity.INFO,
@@ -615,7 +615,7 @@ class ParserService:
             repaired_pages.append(page.page_number)
         if repaired_pages:
             result.warnings.append(
-                ParseWarning(
+                PipelineWarning(
                     code="unanchored_table_numbers_removed",
                     message=f"position and table evidence removed duplicated standalone numbers on {len(repaired_pages)} page(s)",
                     severity=WarningSeverity.INFO,
@@ -665,7 +665,7 @@ class ParserService:
                 continue
             if not repair_enabled:
                 page.warnings.append(
-                    ParseWarning(
+                    PipelineWarning(
                         code="reading_order_inversion",
                         message="native visual-order anchors occur out of order in parsed output",
                         page_number=page.page_number,
@@ -694,7 +694,7 @@ class ParserService:
             diagnostics = page.diagnostics
             if rejection_codes:
                 page.warnings.append(
-                    ParseWarning(
+                    PipelineWarning(
                         code="reading_order_inversion",
                         message="native visual-order anchors occur out of order in parsed output",
                         page_number=page.page_number,
@@ -710,7 +710,7 @@ class ParserService:
             repaired_pages.append(page.page_number)
         if repaired_pages:
             result.warnings.append(
-                ParseWarning(
+                PipelineWarning(
                     code="native_reading_order_repaired",
                     message=f"native PDF geometry repaired reading order on {len(repaired_pages)} page(s)",
                     severity=WarningSeverity.INFO,
@@ -968,7 +968,7 @@ class ParserService:
             warning.code == "native_identifier_missing" for warning in page.warnings
         ):
             page.warnings.append(
-                ParseWarning(
+                PipelineWarning(
                     code="native_identifier_missing",
                     message="one or more long underscore identifiers present in the native PDF text are missing",
                     page_number=page.page_number,
@@ -1005,7 +1005,7 @@ class ParserService:
             warning.code == "native_heading_order_mismatch" for warning in page.warnings
         ):
             page.warnings.append(
-                ParseWarning(
+                PipelineWarning(
                     code="native_heading_order_mismatch",
                     message="a numbered heading differs from the native PDF visual-order heading after whitespace removal",
                     page_number=page.page_number,
@@ -1072,7 +1072,7 @@ class ParserService:
                 warning.code == "suspicious_unicode_glyphs" for warning in page.warnings
             ):
                 page.warnings.append(
-                    ParseWarning(
+                    PipelineWarning(
                         code="suspicious_unicode_glyphs",
                         message="page contains preserved Unicode replacement, control, format, private-use, or surrogate glyphs",
                         page_number=page.page_number,
@@ -1105,7 +1105,7 @@ class ParserService:
                     ],
                 }
             result.warnings.append(
-                ParseWarning(
+                PipelineWarning(
                     code="auto_text_normalized",
                     message=(
                         f"conservative text normalization changed {len(changed_pages)} page(s); "
@@ -1155,7 +1155,7 @@ class ParserService:
                 changed_pages.add(page.page_number)
         if changed_pages:
             result.warnings.append(
-                ParseWarning(
+                PipelineWarning(
                     code="auto_contextual_unicode_normalized",
                     message=f"normalized contextual broken-ToUnicode labels on {len(changed_pages)} page(s)",
                     severity=WarningSeverity.INFO,
@@ -1248,7 +1248,7 @@ class ParserService:
             return
         if getattr(self.vlm_parser, "enabled", None) is False:
             result.warnings.append(
-                ParseWarning(
+                PipelineWarning(
                     code="visual_fusion_unavailable",
                     message="complex visual pages were retained because Qwen is disabled",
                     backend=self.vlm_parser.name,
@@ -1259,7 +1259,7 @@ class ParserService:
         qwen_status = await self.vlm_parser.probe()
         if not qwen_status.ready:
             result.warnings.append(
-                ParseWarning(
+                PipelineWarning(
                     code="visual_fusion_unavailable",
                     message="complex visual pages were retained because Qwen is unavailable",
                     backend=self.vlm_parser.name,
@@ -1345,7 +1345,7 @@ class ParserService:
             except Exception as exc:
                 primary.status = PageStatus.WARNING
                 primary.warnings.append(
-                    ParseWarning(
+                    PipelineWarning(
                         code="visual_fusion_partial",
                         message="regional visual fusion failed and retained the primary page",
                         page_number=page_number,
@@ -1384,7 +1384,7 @@ class ParserService:
         result._vlm_page_numbers.update(adopted)
         result.route_summary.vlm_pages = len(result._vlm_page_numbers)
         result.warnings.append(
-            ParseWarning(
+            PipelineWarning(
                 code="qwen_visual_fusion_used",
                 message=f"Qwen regional visual fusion assembled {len(adopted)} page(s)",
                 severity=WarningSeverity.INFO,
@@ -1488,7 +1488,7 @@ class ParserService:
                                 ]
                         if glyph_repaired_pages:
                             result.warnings.append(
-                                ParseWarning(
+                                PipelineWarning(
                                     code="native_glyph_repaired",
                                     message=f"font and position evidence repaired glyphs on {len(glyph_repaired_pages)} page(s)",
                                     severity=WarningSeverity.INFO,
@@ -1506,7 +1506,7 @@ class ParserService:
                                 for warning in page.warnings
                             ):
                                 page.warnings.append(
-                                    ParseWarning(
+                                    PipelineWarning(
                                         code="suspicious_unicode_mojibake",
                                         message="native font and position evidence could not safely repair a broken ToUnicode mapping",
                                         page_number=page.page_number,
@@ -1537,13 +1537,13 @@ class ParserService:
                         result.usage.duration_ms = max(
                             0, round((time.perf_counter() - started) * 1000)
                         )
-                        result.evidence_ir = self.ir_service.build(
+                        result.parse_result = self.ir_service.build(
                             result,
                             stored,
                             evidence_by_page,
                         )
                         await self.multimodal_service.enrich_page_content(
-                            result.evidence_ir,
+                            result.parse_result,
                             result,
                             stored,
                             evidence_by_page,
@@ -1551,12 +1551,12 @@ class ParserService:
                             image_parser=self.standard_parser,
                             cancel_event=cancel_event,
                         )
-                        result.markdown = result.evidence_ir.renderings.markdown
-                        result.plain_text = result.evidence_ir.renderings.plain_text
+                        result.markdown = result.parse_result.renderings.markdown
+                        result.plain_text = result.parse_result.renderings.plain_text
                         if not parsed_options.include_renderings:
-                            result.evidence_ir.renderings.markdown = ""
-                            result.evidence_ir.renderings.plain_text = ""
-                            for page_ir in result.evidence_ir.units:
+                            result.parse_result.renderings.markdown = ""
+                            result.parse_result.renderings.plain_text = ""
+                            for page_ir in result.parse_result.units:
                                 page_ir.renderings.markdown = ""
                                 page_ir.renderings.plain_text = ""
                             result.markdown = ""

@@ -1,4 +1,4 @@
-"""Image, Office-media, and standalone-video evidence processing."""
+"""Image, Office-media, and standalone-video result processing."""
 
 from __future__ import annotations
 
@@ -21,34 +21,34 @@ from xml.etree import ElementTree
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.document_ir import (
-    AssetIR,
+from app.models.content_result import (
     AssetKind,
-    AssetLocationIR,
+    AssetLocation,
     AssetRole,
     AssetStatus,
-    ContentEvidenceIR,
-    ContentLinksIR,
+    ContentAsset,
+    ContentLinks,
+    ContentParseResult,
     ContentQualitySummary,
+    ContentRegion,
     ContentRenderings,
-    ContentSourceIR,
-    ContentUnitIR,
-    ElementEvidence,
+    ContentSource,
+    ContentUnit,
+    ElementProvenance,
     ElementQuality,
-    EvidenceSource,
-    EvidenceSourceKind,
-    IRWarning,
-    ParseRuntimeIR,
-    RegionIR,
+    ParseRuntime,
+    ParseWarning,
+    ProvenanceSource,
+    ProvenanceSourceKind,
     RegionType,
     SourceKind,
-    TextBlockIR,
+    TextBlock,
     UnitDiagnostics,
     UnitType,
-    VideoAnalysisIR,
-    VideoKeyframeIR,
-    VideoSceneIR,
-    VisualAnalysisIR,
+    VideoAnalysis,
+    VideoKeyframe,
+    VideoScene,
+    VisualAnalysis,
     VisualClassification,
 )
 from app.models.parse_options import ContentParseOptions
@@ -190,9 +190,9 @@ class MultimodalService:
             int(setting(settings, "ffmpeg_max_concurrency", 1))
         )
 
-    def _links(self, content_id: str) -> ContentLinksIR:
+    def _links(self, content_id: str) -> ContentLinks:
         base = f"/v1/content/jobs/{content_id}"
-        return ContentLinksIR(
+        return ContentLinks(
             job=base,
             events=f"{base}/events",
             result=f"{base}/result",
@@ -228,8 +228,14 @@ class MultimodalService:
     @staticmethod
     def _language_instruction(language: Literal["zh-CN", "en", "auto"]) -> str:
         return {
-            "zh-CN": "Use Simplified Chinese.",
-            "en": "Use English.",
+            "zh-CN": (
+                "Write every natural-language output field in Simplified Chinese and set "
+                "the language field to zh-CN. Do not answer in English."
+            ),
+            "en": (
+                "Write every natural-language output field in English and set the "
+                "language field to en."
+            ),
             "auto": "Use the main language visible in the image or sampled frames.",
         }[language]
 
@@ -238,9 +244,9 @@ class MultimodalService:
         visible_text: str,
         *,
         language: Literal["zh-CN", "en", "auto"],
-    ) -> VisualAnalysisIR:
+    ) -> VisualAnalysis:
         english = language == "en"
-        return VisualAnalysisIR(
+        return VisualAnalysis(
             classification=VisualClassification.DOCUMENT,
             summary=(
                 "This image primarily contains parseable document content."
@@ -260,13 +266,13 @@ class MultimodalService:
     async def _analyze_embedded_image(
         self,
         content: bytes,
-        asset: AssetIR,
+        asset: ContentAsset,
         options: ContentParseOptions,
         *,
         content_id: str,
         image_parser: DocumentParser | None,
         cancel_event: object | None,
-    ) -> VisualAnalysisIR:
+    ) -> VisualAnalysis:
         """Route a child image without invoking recursive media discovery."""
 
         visible_text = ""
@@ -324,7 +330,7 @@ class MultimodalService:
         *,
         language: Literal["zh-CN", "en", "auto"],
         classification: VisualClassification | None = None,
-    ) -> VisualAnalysisIR:
+    ) -> VisualAnalysis:
         if not self.vlm.enabled:
             raise ParserUnavailableError("VLM is required for visual media analysis")
         language_instruction = self._language_instruction(language)
@@ -346,7 +352,7 @@ class MultimodalService:
             ),
         )
         response = completion.value
-        return VisualAnalysisIR(
+        return VisualAnalysis(
             classification=classification or response.classification,
             summary=response.summary,
             detailed_description=response.detailed_description,
@@ -390,11 +396,11 @@ class MultimodalService:
         *,
         filename: str,
         role: AssetRole,
-        location: AssetLocationIR,
+        location: AssetLocation,
         parent_asset_id: str | None = None,
         derived: bool = False,
         derived_category: Literal["keyframes", "previews"] = "keyframes",
-    ) -> tuple[AssetIR, bool]:
+    ) -> tuple[ContentAsset, bool]:
         digest = _sha256_bytes(content)
         identifier = _asset_id(digest)
         try:
@@ -419,7 +425,7 @@ class MultimodalService:
                 derived_category=derived_category,
             )
         return (
-            AssetIR(
+            ContentAsset(
                 asset_id=identifier,
                 kind=AssetKind.IMAGE,
                 role=role,
@@ -439,10 +445,10 @@ class MultimodalService:
     async def _preview_asset(
         self,
         content_id: str,
-        original: AssetIR,
+        original: ContentAsset,
         content: bytes,
-        location: AssetLocationIR,
-    ) -> AssetIR | None:
+        location: AssetLocation,
+    ) -> ContentAsset | None:
         if original.mime_type in {"image/png", "image/jpeg", "image/webp"}:
             return None
         normalized = await asyncio.to_thread(self._normalized_png, content)
@@ -459,7 +465,7 @@ class MultimodalService:
         return preview
 
     @staticmethod
-    def _merge_asset(assets: list[AssetIR], candidate: AssetIR) -> AssetIR:
+    def _merge_asset(assets: list[ContentAsset], candidate: ContentAsset) -> ContentAsset:
         existing = next((item for item in assets if item.sha256 == candidate.sha256), None)
         if existing is None:
             assets.append(candidate)
@@ -472,7 +478,7 @@ class MultimodalService:
 
     async def enrich_page_content(
         self,
-        evidence_ir: ContentEvidenceIR,
+        parse_result: ContentParseResult,
         result: DocumentParseResult,
         source: StoredSource,
         evidence_by_page: dict[int, PageEvidence],
@@ -481,7 +487,7 @@ class MultimodalService:
         image_parser: DocumentParser | None = None,
         cancel_event: object | None = None,
     ) -> None:
-        """Add a source image or semantic PDF picture crops to page evidence."""
+        """Add a source image or semantic PDF picture crops to the parse result."""
 
         if source.mime_type.startswith("image/"):
             content = await asyncio.to_thread(source.path.read_bytes)
@@ -490,11 +496,11 @@ class MultimodalService:
                 content,
                 filename=source.filename,
                 role=AssetRole.SOURCE,
-                location=AssetLocationIR(unit_id=evidence_ir.units[0].unit_id, page_number=1),
+                location=AssetLocation(unit_id=parse_result.units[0].unit_id, page_number=1),
             )
-            for unit in evidence_ir.units[1:]:
+            for unit in parse_result.units[1:]:
                 asset.locations.append(
-                    AssetLocationIR(unit_id=unit.unit_id, page_number=unit.index)
+                    AssetLocation(unit_id=unit.unit_id, page_number=unit.index)
                 )
             classification = self.classify_image(evidence_by_page.get(1), result.plain_text)
             if classification == VisualClassification.DOCUMENT:
@@ -508,28 +514,28 @@ class MultimodalService:
                     language=options.description_language,
                     classification=classification,
                 )
-            asset = self._merge_asset(evidence_ir.assets, asset)
-            for unit in evidence_ir.units:
+            asset = self._merge_asset(parse_result.assets, asset)
+            for unit in parse_result.units:
                 if asset.asset_id not in unit.asset_ids:
                     unit.asset_ids.append(asset.asset_id)
             analysis = asset.visual_analysis
             if analysis is None:
                 raise ParserError("source image analysis produced no result")
-            evidence_ir.visual_analysis = analysis
+            parse_result.visual_analysis = analysis
             preview = await self._preview_asset(
                 result.document_id,
                 asset,
                 content,
-                AssetLocationIR(unit_id=evidence_ir.units[0].unit_id, page_number=1),
+                AssetLocation(unit_id=parse_result.units[0].unit_id, page_number=1),
             )
             if preview is not None:
                 preview.visual_analysis = analysis
-                for unit in evidence_ir.units[1:]:
+                for unit in parse_result.units[1:]:
                     preview.locations.append(
-                        AssetLocationIR(unit_id=unit.unit_id, page_number=unit.index)
+                        AssetLocation(unit_id=unit.unit_id, page_number=unit.index)
                     )
-                preview = self._merge_asset(evidence_ir.assets, preview)
-                for unit in evidence_ir.units:
+                preview = self._merge_asset(parse_result.assets, preview)
+                for unit in parse_result.units:
                     if preview.asset_id not in unit.asset_ids:
                         unit.asset_ids.append(preview.asset_id)
             description = analysis.detailed_description or analysis.summary
@@ -538,16 +544,16 @@ class MultimodalService:
                 VisualClassification.MIXED,
                 VisualClassification.UNKNOWN,
             }:
-                evidence_ir.renderings.markdown = (
-                    f"{evidence_ir.renderings.markdown}\n\n## 图片描述\n\n{description}".strip()
+                parse_result.renderings.markdown = (
+                    f"{parse_result.renderings.markdown}\n\n## 图片描述\n\n{description}".strip()
                 )
-                evidence_ir.renderings.plain_text = (
-                    f"{evidence_ir.renderings.plain_text}\n\n图片描述：{description}".strip()
+                parse_result.renderings.plain_text = (
+                    f"{parse_result.renderings.plain_text}\n\n图片描述：{description}".strip()
                 )
 
         if source.mime_type == "application/pdf":
             await self._enrich_pdf_pictures(
-                evidence_ir,
+                parse_result,
                 result,
                 source,
                 options,
@@ -557,7 +563,7 @@ class MultimodalService:
 
     async def _enrich_pdf_pictures(
         self,
-        evidence_ir: ContentEvidenceIR,
+        parse_result: ContentParseResult,
         result: DocumentParseResult,
         source: StoredSource,
         options: ContentParseOptions,
@@ -567,12 +573,12 @@ class MultimodalService:
     ) -> None:
         candidates = list(result._picture_candidates)[: self.max_assets]
         for index, picture in enumerate(candidates, start=1):
-            current_asset: AssetIR | None = None
+            current_asset: ContentAsset | None = None
             page_number = int(getattr(picture, "page_number", 0))
             bbox = getattr(picture, "normalized_bbox", None)
             if page_number < 1 or not isinstance(bbox, tuple):
                 continue
-            unit = next((item for item in evidence_ir.units if item.index == page_number), None)
+            unit = next((item for item in parse_result.units if item.index == page_number), None)
             if unit is None:
                 continue
             try:
@@ -583,9 +589,9 @@ class MultimodalService:
                     crop,
                     filename=f"page-{page_number}-image-{index}.png",
                     role=AssetRole.PAGE_CROP,
-                    location=AssetLocationIR(unit_id=unit.unit_id, page_number=page_number),
+                    location=AssetLocation(unit_id=unit.unit_id, page_number=page_number),
                 )
-                current_asset = self._merge_asset(evidence_ir.assets, asset)
+                current_asset = self._merge_asset(parse_result.assets, asset)
                 if (
                     current_asset.visual_analysis is None
                     and "embedded_image_analysis_failed"
@@ -606,9 +612,9 @@ class MultimodalService:
                     current_asset.status = AssetStatus.FAILED
                     if "embedded_image_analysis_failed" not in current_asset.warning_codes:
                         current_asset.warning_codes.append("embedded_image_analysis_failed")
-                evidence_ir.status = "partial"
-                evidence_ir.warnings.append(
-                    IRWarning(
+                parse_result.status = "partial"
+                parse_result.warnings.append(
+                    ParseWarning(
                         code="embedded_image_analysis_failed",
                         severity="warning",
                         unit_index=page_number,
@@ -619,20 +625,20 @@ class MultimodalService:
                     "embedded image processing failed",
                     extra={"unit": page_number, "error_code": type(exc).__name__},
                 )
-        self._project_asset_descriptions(evidence_ir)
+        self._project_asset_descriptions(parse_result)
 
     @staticmethod
-    def _project_asset_descriptions(evidence: ContentEvidenceIR) -> None:
+    def _project_asset_descriptions(parse_result: ContentParseResult) -> None:
         described = [
             asset
-            for asset in evidence.assets
+            for asset in parse_result.assets
             if asset.role not in {AssetRole.SOURCE, AssetRole.PREVIEW}
             and asset.visual_analysis is not None
         ]
         if not described:
             return
-        markdown = [evidence.renderings.markdown.rstrip(), "", "## 图片资产"]
-        plain = [evidence.renderings.plain_text.rstrip(), "", "图片资产："]
+        markdown = [parse_result.renderings.markdown.rstrip(), "", "## 图片资产"]
+        plain = [parse_result.renderings.plain_text.rstrip(), "", "图片资产："]
         for asset in described:
             analysis = asset.visual_analysis
             if analysis is None:
@@ -645,8 +651,8 @@ class MultimodalService:
                 indented = visible_text.replace("\n", "\n    ")
                 markdown.append(f"  - 可见文本：{indented}")
                 plain.append(f"  可见文本：{visible_text}")
-        evidence.renderings.markdown = "\n".join(markdown).strip()
-        evidence.renderings.plain_text = "\n".join(plain).strip()
+        parse_result.renderings.markdown = "\n".join(markdown).strip()
+        parse_result.renderings.plain_text = "\n".join(plain).strip()
 
     @staticmethod
     def _office_relationship_owner(relationship_name: str) -> str:
@@ -796,38 +802,38 @@ class MultimodalService:
         )
         kind = SourceKind.DOCX if source.mime_type == DOCX_MIME else SourceKind.PPTX
         unit_type = UnitType.DOCUMENT_BODY if kind == SourceKind.DOCX else UnitType.SLIDE
-        units: list[ContentUnitIR] = []
+        units: list[ContentUnit] = []
         for page in page_results:
             unit_id = f"unit-{page.page_number}"
             text = page.plain_text or ""
-            blocks: list[TextBlockIR] = []
-            regions: list[RegionIR] = []
+            blocks: list[TextBlock] = []
+            regions: list[ContentRegion] = []
             if text.strip():
                 region_id = f"{unit_id}-body"
                 block_id = f"{unit_id}-body-1"
                 blocks.append(
-                    TextBlockIR(
+                    TextBlock(
                         block_id=block_id,
                         unit_id=unit_id,
                         region_id=region_id,
                         reading_order=1,
                         text=text,
                         quality=ElementQuality.COMPLETE,
-                        evidence=ElementEvidence(
-                            selected_source=EvidenceSourceKind.DOCLING,
-                            supporting_sources=[EvidenceSourceKind.OOXML],
+                        provenance=ElementProvenance(
+                            selected_source=ProvenanceSourceKind.DOCLING,
+                            supporting_sources=[ProvenanceSourceKind.OOXML],
                             sources=[
-                                EvidenceSource(
-                                    source=EvidenceSourceKind.DOCLING,
+                                ProvenanceSource(
+                                    source=ProvenanceSourceKind.DOCLING,
                                     backend="docling-office",
                                 ),
-                                EvidenceSource(source=EvidenceSourceKind.OOXML),
+                                ProvenanceSource(source=ProvenanceSourceKind.OOXML),
                             ],
                         ),
                     )
                 )
                 regions.append(
-                    RegionIR(
+                    ContentRegion(
                         region_id=region_id,
                         unit_id=unit_id,
                         region_type=RegionType.TEXT,
@@ -836,7 +842,7 @@ class MultimodalService:
                     )
                 )
             units.append(
-                ContentUnitIR(
+                ContentUnit(
                     unit_id=unit_id,
                     unit_type=unit_type,
                     index=page.page_number,
@@ -855,8 +861,8 @@ class MultimodalService:
                     duration_ms=page.duration_ms,
                 )
             )
-        evidence = ContentEvidenceIR(
-            source=ContentSourceIR(
+        parse_result = ContentParseResult(
+            source=ContentSource(
                 content_id=content_id,
                 source_sha256=_sha256_file(source.path),
                 filename=source.filename,
@@ -869,10 +875,10 @@ class MultimodalService:
             units=units,
             renderings=ContentRenderings(markdown=markdown, plain_text=plain_text),
             diagnostics=ContentQualitySummary(trusted_units=len(units)),
-            runtime=ParseRuntimeIR(
+            runtime=ParseRuntime(
                 profile=options.profile.value,
                 primary_backend="docling-office",
-                parser_version=str(setting(self.settings, "version", "0.3.0")),
+                parser_version=str(setting(self.settings, "version", "0.4.0")),
                 input_bytes=source.size_bytes,
                 duration_ms=duration_ms,
             ),
@@ -887,7 +893,7 @@ class MultimodalService:
                 embedded.content,
                 filename=embedded.filename,
                 role=AssetRole.EMBEDDED_IMAGE,
-                location=AssetLocationIR(
+                location=AssetLocation(
                     unit_id=unit.unit_id,
                     slide_number=embedded.unit_index if kind == SourceKind.PPTX else None,
                     relationship_id=embedded.relationship_id,
@@ -896,7 +902,7 @@ class MultimodalService:
                     ),
                 ),
             )
-            asset = self._merge_asset(evidence.assets, asset)
+            asset = self._merge_asset(parse_result.assets, asset)
             if asset.asset_id not in unit.asset_ids:
                 unit.asset_ids.append(asset.asset_id)
             if (
@@ -915,9 +921,9 @@ class MultimodalService:
                 except ParserError as exc:
                     asset.status = AssetStatus.FAILED
                     asset.warning_codes.append("embedded_image_analysis_failed")
-                    evidence.status = "partial"
-                    evidence.warnings.append(
-                        IRWarning(
+                    parse_result.status = "partial"
+                    parse_result.warnings.append(
+                        ParseWarning(
                             code="embedded_image_analysis_failed",
                             severity="warning",
                             unit_index=embedded.unit_index,
@@ -933,7 +939,7 @@ class MultimodalService:
                     content_id,
                     asset,
                     embedded.content,
-                    AssetLocationIR(
+                    AssetLocation(
                         unit_id=unit.unit_id,
                         slide_number=embedded.unit_index if kind == SourceKind.PPTX else None,
                         relationship_id=embedded.relationship_id,
@@ -945,9 +951,9 @@ class MultimodalService:
                 if asset.status == AssetStatus.READY:
                     asset.status = AssetStatus.PARTIAL
                 asset.warning_codes.append("embedded_image_preview_failed")
-                evidence.status = "partial"
-                evidence.warnings.append(
-                    IRWarning(
+                parse_result.status = "partial"
+                parse_result.warnings.append(
+                    ParseWarning(
                         code="embedded_image_preview_failed",
                         severity="warning",
                         unit_index=embedded.unit_index,
@@ -962,19 +968,19 @@ class MultimodalService:
                 preview.visual_analysis = asset.visual_analysis
                 preview.status = asset.status
                 preview.warning_codes = list(asset.warning_codes)
-                preview = self._merge_asset(evidence.assets, preview)
+                preview = self._merge_asset(parse_result.assets, preview)
                 if preview.asset_id not in unit.asset_ids:
                     unit.asset_ids.append(preview.asset_id)
-        self._project_asset_descriptions(evidence)
-        result.markdown = evidence.renderings.markdown
-        result.plain_text = evidence.renderings.plain_text
+        self._project_asset_descriptions(parse_result)
+        result.markdown = parse_result.renderings.markdown
+        result.plain_text = parse_result.renderings.plain_text
         if not options.include_renderings:
-            evidence.renderings = ContentRenderings()
-            for unit in evidence.units:
+            parse_result.renderings = ContentRenderings()
+            for unit in parse_result.units:
                 unit.renderings = ContentRenderings()
             result.markdown = ""
             result.plain_text = ""
-        result.evidence_ir = evidence
+        result.parse_result = parse_result
         return result
 
     async def _run_process(
@@ -1196,7 +1202,7 @@ class MultimodalService:
         await self.storage.write_asset(
             content_id, source_asset_id, source.filename, video_bytes, derived=False
         )
-        source_asset = AssetIR(
+        source_asset = ContentAsset(
             asset_id=source_asset_id,
             kind=AssetKind.VIDEO,
             role=AssetRole.SOURCE,
@@ -1207,11 +1213,11 @@ class MultimodalService:
             width=metadata.width,
             height=metadata.height,
             duration_ms=metadata.duration_ms,
-            locations=[AssetLocationIR(unit_id="unit-1")],
+            locations=[AssetLocation(unit_id="unit-1")],
             download_url=f"/v1/content/jobs/{content_id}/assets/{source_asset_id}",
         )
         assets = [source_asset]
-        keyframes: list[VideoKeyframeIR] = []
+        keyframes: list[VideoKeyframe] = []
         qwen_duration = 0
         visual_calls = 0
         for index, timestamp in enumerate(timestamps, start=1):
@@ -1223,7 +1229,7 @@ class MultimodalService:
                 frame,
                 filename=f"keyframe-{index:03d}-{round(timestamp * 1000)}ms.png",
                 role=AssetRole.KEYFRAME,
-                location=AssetLocationIR(unit_id="unit-1", timestamp_ms=round(timestamp * 1000)),
+                location=AssetLocation(unit_id="unit-1", timestamp_ms=round(timestamp * 1000)),
                 parent_asset_id=source_asset_id,
                 derived=True,
             )
@@ -1242,7 +1248,7 @@ class MultimodalService:
                     0, round((time.perf_counter() - visual_started) * 1000)
                 )
             keyframes.append(
-                VideoKeyframeIR(
+                VideoKeyframe(
                     asset_id=asset.asset_id,
                     timestamp_ms=round(timestamp * 1000),
                     visual_analysis=asset.visual_analysis,
@@ -1274,7 +1280,7 @@ class MultimodalService:
         )
         qwen_duration += summary_completion.duration_ms
         qwen_calls = visual_calls + 1
-        scenes: list[VideoSceneIR] = []
+        scenes: list[VideoScene] = []
         for index, keyframe in enumerate(keyframes):
             previous = keyframes[index - 1].timestamp_ms if index else 0
             following = (
@@ -1291,7 +1297,7 @@ class MultimodalService:
             scene_id = f"scene-{index + 1}"
             keyframe.scene_id = scene_id
             scenes.append(
-                VideoSceneIR(
+                VideoScene(
                     scene_id=scene_id,
                     start_ms=start_ms,
                     end_ms=end_ms,
@@ -1311,7 +1317,7 @@ class MultimodalService:
             for frame in keyframes
         )
         duration_ms = max(0, round((time.perf_counter() - started) * 1000))
-        video_analysis = VideoAnalysisIR(
+        video_analysis = VideoAnalysis(
             duration_ms=metadata.duration_ms,
             width=metadata.width,
             height=metadata.height,
@@ -1321,8 +1327,8 @@ class MultimodalService:
             scenes=scenes,
             keyframes=keyframes,
         )
-        evidence = ContentEvidenceIR(
-            source=ContentSourceIR(
+        parse_result = ContentParseResult(
+            source=ContentSource(
                 content_id=content_id,
                 source_sha256=video_digest,
                 filename=source.filename,
@@ -1335,7 +1341,7 @@ class MultimodalService:
                 height=metadata.height,
             ),
             units=[
-                ContentUnitIR(
+                ContentUnit(
                     unit_id="unit-1",
                     unit_type=UnitType.VIDEO,
                     index=1,
@@ -1361,11 +1367,11 @@ class MultimodalService:
                 plain_text=plain_text if options.include_renderings else "",
             ),
             diagnostics=ContentQualitySummary(trusted_units=1, visual_units=1),
-            runtime=ParseRuntimeIR(
+            runtime=ParseRuntime(
                 profile=options.profile.value,
                 primary_backend="ffmpeg+vlm",
                 visual_backend=self.vlm.model,
-                parser_version=str(setting(self.settings, "version", "0.3.0")),
+                parser_version=str(setting(self.settings, "version", "0.4.0")),
                 input_bytes=source.size_bytes,
                 duration_ms=duration_ms,
                 qwen_calls=qwen_calls,
@@ -1399,6 +1405,6 @@ class MultimodalService:
                 trusted_pages=1, visual_pages=1, qwen_calls=qwen_calls
             ),
             usage=ParseUsage(input_bytes=source.size_bytes, duration_ms=duration_ms),
-            evidence_ir=evidence,
+            parse_result=parse_result,
         )
         return result

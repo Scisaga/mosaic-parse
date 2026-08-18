@@ -258,7 +258,7 @@ class JobRepository:
         to_status: JobStatus | str,
         *,
         error: JobError | None = None,
-        result_ir_path: str | None = None,
+        result_path: str | None = None,
         result_markdown_path: str | None = None,
         result_text_path: str | None = None,
     ) -> JobRecord:
@@ -281,8 +281,8 @@ class JobRepository:
                     job.completed_at = now
                 if error is not None:
                     job.error = error
-                if result_ir_path is not None:
-                    job.result_ir_path = result_ir_path
+                if result_path is not None:
+                    job.result_path = result_path
                 if result_markdown_path is not None:
                     job.result_markdown_path = result_markdown_path
                 if result_text_path is not None:
@@ -320,7 +320,7 @@ class JobRepository:
         self,
         job_id: str,
         *,
-        ir_path: str,
+        result_path: str,
         markdown_path: str,
         text_path: str,
         partial: bool = False,
@@ -328,7 +328,7 @@ class JobRepository:
         return await self.transition(
             job_id,
             JobStatus.PARTIAL if partial else JobStatus.COMPLETED,
-            result_ir_path=ir_path,
+            result_path=result_path,
             result_markdown_path=markdown_path,
             result_text_path=text_path,
         )

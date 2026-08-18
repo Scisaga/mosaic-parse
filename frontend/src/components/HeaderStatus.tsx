@@ -20,7 +20,9 @@ const labelByStatus = {
 
 export function HeaderStatus({ snapshot, loading, onRefresh, apiKey, onApiKeyChange }: HeaderStatusProps) {
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [statusOpen, setStatusOpen] = useState(false)
   const [draftKey, setDraftKey] = useState(apiKey)
+  const statusButtonRef = useRef<HTMLButtonElement>(null)
   const settingsButtonRef = useRef<HTMLButtonElement>(null)
   const dialogRef = useRef<HTMLElement>(null)
   useEffect(() => setDraftKey(apiKey), [apiKey])
@@ -52,34 +54,50 @@ export function HeaderStatus({ snapshot, loading, onRefresh, apiKey, onApiKeyCha
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
   }, [closeSettings, settingsOpen])
+  useEffect(() => {
+    if (!statusOpen) return
+    const closeStatus = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      setStatusOpen(false)
+      statusButtonRef.current?.focus()
+    }
+    document.addEventListener('keydown', closeStatus)
+    return () => document.removeEventListener('keydown', closeStatus)
+  }, [statusOpen])
   const apiStatus = snapshot?.api ?? (loading ? 'checking' : 'unavailable')
+  const services = [
+    { id: 'api', label: 'API', status: apiStatus, message: 'HTTP API 与任务服务' },
+    ...(snapshot?.backends ?? []),
+  ]
+  const readyCount = services.filter((service) => service.status === 'ready').length
+  const aggregateStatus = loading ? 'checking' : readyCount === services.length ? 'ready' : 'unavailable'
   return (
     <header className="app-header">
       <div className="brand-lockup">
         <img className="brand-logo" src="/logo.png?v=4" alt="" aria-hidden="true" />
         <div className="brand-copy">
           <h1>MosaicParse</h1>
-          <p>多模态内容证据解析</p>
+          <p>多模态内容解析</p>
         </div>
       </div>
       <div className="header-operations">
         <div className="service-statuses" aria-label="服务状态" aria-live="polite">
-          <span className={`status-pill status-${apiStatus}`} title="来自 /health 与 /ready 的实时状态">
-            <i aria-hidden="true" /> <b>API</b> {labelByStatus[apiStatus]}
-          </span>
-          {(snapshot?.backends ?? []).map((backend) => (
-            <span
-              className={`status-pill status-${backend.status}`}
-              title={backend.message || `来自 /v1/backends 的 ${backend.label} 状态`}
-              key={backend.id}
-            >
-              <i aria-hidden="true" /> <b>{backend.label}</b> {labelByStatus[backend.status]}
-            </span>
-          ))}
-          {snapshot?.queue && (
-            <span className="queue-pill" title="当前任务 / 队列容量">
-              <span>任务队列</span> {snapshot.queue.active ?? '—'} / {snapshot.queue.capacity ?? '—'}
-            </span>
+          <button ref={statusButtonRef} className={`service-summary status-${aggregateStatus}`} type="button" aria-expanded={statusOpen} aria-controls="service-status-popover" onClick={() => setStatusOpen((value) => !value)}>
+            <i aria-hidden="true" /> 服务 {readyCount}/{services.length} 就绪
+          </button>
+          {statusOpen && (
+            <section id="service-status-popover" className="service-status-popover" aria-label="服务状态详情">
+              <div className="service-status-heading"><strong>服务状态</strong><span>实时探测</span></div>
+              <ul>
+                {services.map((service) => (
+                  <li className={`status-${service.status}`} title={service.message || undefined} key={service.id}>
+                    <span><i aria-hidden="true" />{service.label}</span><b>{labelByStatus[service.status]}</b>
+                  </li>
+                ))}
+              </ul>
+              <div className="service-queue"><span>任务队列</span><b>{snapshot?.queue?.active ?? '—'} / {snapshot?.queue?.capacity ?? '—'}</b></div>
+            </section>
           )}
         </div>
         <nav className="header-actions" aria-label="全局操作">

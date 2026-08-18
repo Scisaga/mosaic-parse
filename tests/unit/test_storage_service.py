@@ -11,17 +11,17 @@ from app.models import (
     PageParseResult,
     PageStatus,
     ParsePipeline,
-    ParseWarning,
+    PipelineWarning,
     RouteSummary,
     StoredSource,
 )
 from app.services.ir_service import DocumentIRService
-from app.services.storage_service import LegacyEvidenceError, StorageService
+from app.services.storage_service import LegacyResultContractError, StorageService
 
 
 async def test_write_result_persists_content_metadata_and_warning_log(tmp_path: Path) -> None:
     storage = StorageService(SimpleNamespace(data_dir=tmp_path))
-    warning = ParseWarning(code="low_text_content", message="too short", page_number=1)
+    warning = PipelineWarning(code="low_text_content", message="too short", page_number=1)
     result = DocumentParseResult(
         document_id="job_warning",
         filename="report.pdf",
@@ -45,7 +45,7 @@ async def test_write_result_persists_content_metadata_and_warning_log(tmp_path: 
     )
     source_path = tmp_path / "report.pdf"
     source_path.write_bytes(b"fixture")
-    result.evidence_ir = DocumentIRService().build(
+    result.parse_result = DocumentIRService().build(
         result,
         StoredSource(
             path=source_path,
@@ -61,8 +61,8 @@ async def test_write_result_persists_content_metadata_and_warning_log(tmp_path: 
 
     assert paths.markdown.read_text() == "# Result"
     assert paths.text.read_text() == "Result"
-    assert paths.ir.is_file()
-    assert json.loads(paths.ir.read_text())["object"] == "content.evidence"
+    assert paths.result.is_file()
+    assert json.loads(paths.result.read_text())["object"] == "content.parse_result"
     payload = json.loads(paths.warnings.read_text())
     assert payload["document_warnings"][0]["code"] == "low_text_content"
     assert payload["units"][0]["unit_index"] == 1
@@ -73,8 +73,8 @@ async def test_legacy_result_is_retained_but_not_silently_converted(tmp_path: Pa
     storage = StorageService(SimpleNamespace(data_dir=tmp_path))
     await storage.create_job_layout("job_legacy")
     (storage.output_dir("job_legacy") / "result.json").write_text(
-        '{"schema_version":"document-evidence/1.0","object":"document.evidence"}',
+        '{"schema_version":"content-evidence/1.0","object":"content.evidence"}',
         encoding="utf-8",
     )
-    with pytest.raises(LegacyEvidenceError):
-        await storage.read_evidence("job_legacy")
+    with pytest.raises(LegacyResultContractError):
+        await storage.read_parse_result("job_legacy")

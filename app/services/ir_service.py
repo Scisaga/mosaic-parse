@@ -1,4 +1,4 @@
-"""Materialize content evidence from the proven page-oriented parser pipeline."""
+"""Materialize a content parse result from the proven page-oriented parser pipeline."""
 
 from __future__ import annotations
 
@@ -7,27 +7,27 @@ import re
 import statistics
 from pathlib import Path
 
-from app.models.document_ir import (
-    ContentEvidenceIR,
-    ContentLinksIR,
+from app.models.content_result import (
+    ContentLinks,
+    ContentParseResult,
     ContentQualitySummary,
+    ContentRegion,
     ContentRenderings,
-    ContentSourceIR,
-    ContentUnitIR,
-    ElementEvidence,
+    ContentSource,
+    ContentUnit,
+    ElementProvenance,
     ElementQuality,
-    EvidenceSource,
-    EvidenceSourceKind,
-    IRWarning,
-    LogicalTableIR,
+    LogicalTable,
     NormalizedBBox,
-    ParseRuntimeIR,
-    RegionIR,
+    ParsedTable,
+    ParseRuntime,
+    ParseWarning,
+    ProvenanceSource,
+    ProvenanceSourceKind,
     RegionType,
     SourceKind,
-    TableCellIR,
-    TableIR,
-    TextBlockIR,
+    TableCell,
+    TextBlock,
     UnitDiagnostics,
     UnitType,
 )
@@ -80,15 +80,15 @@ def _native_bbox(
     )
 
 
-def _source_kind(value: str) -> EvidenceSourceKind:
+def _source_kind(value: str) -> ProvenanceSourceKind:
     normalized = value.casefold()
     if "qwen" in normalized or "vlm" in normalized:
-        return EvidenceSourceKind.QWEN
+        return ProvenanceSourceKind.QWEN
     if "glm" in normalized or "sdk" in normalized:
-        return EvidenceSourceKind.GLM
+        return ProvenanceSourceKind.GLM
     if "native" in normalized or "pymupdf" in normalized:
-        return EvidenceSourceKind.NATIVE
-    return EvidenceSourceKind.DOCLING
+        return ProvenanceSourceKind.NATIVE
+    return ProvenanceSourceKind.DOCLING
 
 
 def _cell_evidence(
@@ -97,7 +97,7 @@ def _cell_evidence(
     fragment: TableFragment,
     row: int,
     column: int,
-) -> tuple[ElementQuality, ElementEvidence]:
+) -> tuple[ElementQuality, ElementProvenance]:
     base_source = _source_kind(fragment.source_kind)
     values: dict[str, str | None] = {}
     if row < len(fragment.cell_evidence) and column < len(fragment.cell_evidence[row]):
@@ -121,20 +121,20 @@ def _cell_evidence(
     quality = ElementQuality.CONFIRMED if len(supporting) >= 2 else ElementQuality.SELECTED
     if not fragment.valid:
         quality = ElementQuality.CONFLICTED
-    return quality, ElementEvidence(
+    return quality, ElementProvenance(
         selected_source=selected_source,
         supporting_sources=supporting,
         sources=[
-            EvidenceSource(source=source) for source in sorted(sources, key=lambda x: x.value)
+            ProvenanceSource(source=source) for source in sorted(sources, key=lambda x: x.value)
         ],
         reason_codes=list(fragment.invalid_reasons),
     )
 
 
-def _fragment_cells(fragment: TableFragment) -> list[TableCellIR]:
+def _fragment_cells(fragment: TableFragment) -> list[TableCell]:
     explicit = {(cell.row, cell.column): cell for cell in fragment.cells}
     occupied: set[tuple[int, int]] = set()
-    output: list[TableCellIR] = []
+    output: list[TableCell] = []
     for row in range(fragment.num_rows):
         values = fragment.rows[row] if row < len(fragment.rows) else []
         for column in range(fragment.num_cols):
@@ -151,7 +151,7 @@ def _fragment_cells(fragment: TableFragment) -> list[TableCellIR]:
             if not text and not fragment.valid:
                 quality = ElementQuality.MISSING
             output.append(
-                TableCellIR(
+                TableCell(
                     cell_id=f"{fragment.fragment_id}-r{row}-c{column}",
                     row=row,
                     column=column,
@@ -162,7 +162,7 @@ def _fragment_cells(fragment: TableFragment) -> list[TableCellIR]:
                     is_column_header=(source.is_column_header if source else row == 0),
                     is_row_header=source.is_row_header if source else False,
                     quality=quality,
-                    evidence=evidence,
+                    provenance=evidence,
                 )
             )
     return output
@@ -185,7 +185,7 @@ def _coverage(inner: NormalizedBBox | None, outer: NormalizedBBox | None) -> flo
     return width * height / area if area > 0 else 0.0
 
 
-def _region_order(region: RegionIR) -> tuple[float, float, int]:
+def _region_order(region: ContentRegion) -> tuple[float, float, int]:
     if region.bbox is not None:
         return region.bbox.top, region.bbox.left, region.reading_order
     return 2.0, 2.0, region.reading_order
@@ -205,12 +205,12 @@ class DocumentIRService:
         result: DocumentParseResult,
         source: StoredSource,
         evidence_by_page: dict[int, PageEvidence],
-    ) -> ContentEvidenceIR:
+    ) -> ContentParseResult:
         fragments = [
             fragment for fragment in result._table_fragments if isinstance(fragment, TableFragment)
         ]
         tables = [self._table(fragment) for fragment in fragments]
-        tables_by_page: dict[int, list[TableIR]] = {}
+        tables_by_page: dict[int, list[ParsedTable]] = {}
         for table in tables:
             tables_by_page.setdefault(table.source_units[0], []).append(table)
         pictures_by_page: dict[int, list[object]] = {}
@@ -231,12 +231,12 @@ class DocumentIRService:
         ]
         if source.mime_type.startswith("image/") and len(units) == 1:
             units[0].unit_type = UnitType.IMAGE
-        logical_groups: dict[str, list[TableIR]] = {}
+        logical_groups: dict[str, list[ParsedTable]] = {}
         for table in tables:
             if table.logical_table_id:
                 logical_groups.setdefault(table.logical_table_id, []).append(table)
         logical_tables = [
-            LogicalTableIR(
+            LogicalTable(
                 logical_table_id=logical_id,
                 fragment_table_ids=[table.table_id for table in group],
                 source_units=sorted({unit for table in group for unit in table.source_units}),
@@ -246,9 +246,9 @@ class DocumentIRService:
 
         summary = result.quality_summary
         qwen_calls = summary.qwen_calls if summary is not None else 0
-        return ContentEvidenceIR(
+        return ContentParseResult(
             status="partial" if result.route_summary.failed_pages else "completed",
-            source=ContentSourceIR(
+            source=ContentSource(
                 content_id=result.document_id,
                 source_sha256=_sha256(source.path),
                 filename=result.filename,
@@ -278,7 +278,7 @@ class DocumentIRService:
                 unresolved_visual_conflicts=(summary.unresolved_visual_conflicts if summary else 0),
             ),
             warnings=[
-                IRWarning(
+                ParseWarning(
                     code=warning.code,
                     severity=warning.severity.value,
                     unit_index=warning.page_number,
@@ -286,17 +286,17 @@ class DocumentIRService:
                 )
                 for warning in result.warnings
             ],
-            runtime=ParseRuntimeIR(
+            runtime=ParseRuntime(
                 profile=result.pipeline.profile,  # type: ignore[arg-type]
                 primary_backend=result.pipeline.primary,
                 ocr_backend=result.pipeline.ocr,
                 visual_backend=result.pipeline.vlm,
-                parser_version=str(setting(self.settings, "version", "0.3.0")),
+                parser_version=str(setting(self.settings, "version", "0.4.0")),
                 input_bytes=result.usage.input_bytes,
                 duration_ms=result.usage.duration_ms,
                 qwen_calls=qwen_calls,
             ),
-            links=ContentLinksIR(
+            links=ContentLinks(
                 job=f"/v1/content/jobs/{result.document_id}",
                 events=f"/v1/content/jobs/{result.document_id}/events",
                 result=f"/v1/content/jobs/{result.document_id}/result",
@@ -307,9 +307,9 @@ class DocumentIRService:
         )
 
     @staticmethod
-    def _table(fragment: TableFragment) -> TableIR:
+    def _table(fragment: TableFragment) -> ParsedTable:
         quality = ElementQuality.COMPLETE if fragment.valid else ElementQuality.CONFLICTED
-        return TableIR(
+        return ParsedTable(
             table_id=fragment.fragment_id,
             unit_id=f"p{fragment.page_number}",
             region_id=f"{fragment.fragment_id}-region",
@@ -330,15 +330,15 @@ class DocumentIRService:
     def _page(
         page: PageParseResult,
         evidence: PageEvidence | None,
-        tables_by_page: dict[int, list[TableIR]],
+        tables_by_page: dict[int, list[ParsedTable]],
         visual_page_ir: object | None,
         picture_candidates: list[object],
-    ) -> ContentUnitIR:
+    ) -> ContentUnit:
         page_number = int(page.page_number)
         page_id = f"p{page_number}"
         page_tables = tables_by_page.get(page_number, [])
-        blocks: list[TextBlockIR] = []
-        regions: list[RegionIR] = []
+        blocks: list[TextBlock] = []
+        regions: list[ContentRegion] = []
         if evidence and evidence.native_blocks:
             ordered = evidence._blocks_in_reading_order()
             sizes = [block.max_font_size for block in ordered if block.max_font_size > 0]
@@ -355,7 +355,7 @@ class DocumentIRService:
                 bbox = _native_bbox(native_block.bbox, evidence)
                 if any(_coverage(bbox, table.bbox) >= 0.5 for table in page_tables):
                     continue
-                item = TextBlockIR(
+                item = TextBlock(
                     block_id=block_id,
                     unit_id=page_id,
                     region_id=region_id,
@@ -364,15 +364,15 @@ class DocumentIRService:
                     reading_order=index,
                     text=native_block.text,
                     quality=ElementQuality.COMPLETE,
-                    evidence=ElementEvidence(
-                        selected_source=EvidenceSourceKind.NATIVE,
-                        supporting_sources=[EvidenceSourceKind.NATIVE],
-                        sources=[EvidenceSource(source=EvidenceSourceKind.NATIVE)],
+                    provenance=ElementProvenance(
+                        selected_source=ProvenanceSourceKind.NATIVE,
+                        supporting_sources=[ProvenanceSourceKind.NATIVE],
+                        sources=[ProvenanceSource(source=ProvenanceSourceKind.NATIVE)],
                     ),
                 )
                 blocks.append(item)
                 regions.append(
-                    RegionIR(
+                    ContentRegion(
                         region_id=region_id,
                         unit_id=page_id,
                         region_type=block_type,
@@ -388,22 +388,22 @@ class DocumentIRService:
                 region_id = f"{page_id}-r1"
                 source = _source_kind(str(getattr(page, "backend", "") or "docling"))
                 blocks.append(
-                    TextBlockIR(
+                    TextBlock(
                         block_id=block_id,
                         unit_id=page_id,
                         region_id=region_id,
                         reading_order=1,
                         text=text,
                         quality=ElementQuality.SELECTED,
-                        evidence=ElementEvidence(
+                        provenance=ElementProvenance(
                             selected_source=source,
                             supporting_sources=[source],
-                            sources=[EvidenceSource(source=source)],
+                            sources=[ProvenanceSource(source=source)],
                         ),
                     )
                 )
                 regions.append(
-                    RegionIR(
+                    ContentRegion(
                         region_id=region_id,
                         unit_id=page_id,
                         region_type=RegionType.TEXT,
@@ -414,7 +414,7 @@ class DocumentIRService:
                 )
         for offset, table in enumerate(page_tables, len(regions) + 1):
             regions.append(
-                RegionIR(
+                ContentRegion(
                     region_id=table.region_id,
                     unit_id=page_id,
                     region_type=RegionType.TABLE,
@@ -429,7 +429,7 @@ class DocumentIRService:
         visual_only_names = getattr(signature, "visual_only_names", []) if signature else []
         if signature is not None and bool(getattr(signature, "has_seal", False)):
             regions.append(
-                RegionIR(
+                ContentRegion(
                     region_id=f"{page_id}-seal",
                     unit_id=page_id,
                     region_type=RegionType.SEAL,
@@ -448,7 +448,7 @@ class DocumentIRService:
                 block_id = f"{handwriting_region_id}-b{len(handwriting_blocks) + 1}"
                 handwriting_blocks.append(block_id)
                 blocks.append(
-                    TextBlockIR(
+                    TextBlock(
                         block_id=block_id,
                         unit_id=page_id,
                         region_id=handwriting_region_id,
@@ -456,16 +456,16 @@ class DocumentIRService:
                         reading_order=len(regions) + 1,
                         text=text,
                         quality=ElementQuality.SELECTED,
-                        evidence=ElementEvidence(
-                            selected_source=EvidenceSourceKind.QWEN,
-                            supporting_sources=[EvidenceSourceKind.QWEN],
-                            sources=[EvidenceSource(source=EvidenceSourceKind.QWEN)],
+                        provenance=ElementProvenance(
+                            selected_source=ProvenanceSourceKind.QWEN,
+                            supporting_sources=[ProvenanceSourceKind.QWEN],
+                            sources=[ProvenanceSource(source=ProvenanceSourceKind.QWEN)],
                             reason_codes=["visual_only_handwriting"],
                         ),
                     )
                 )
             regions.append(
-                RegionIR(
+                ContentRegion(
                     region_id=handwriting_region_id,
                     unit_id=page_id,
                     region_type=RegionType.HANDWRITING,
@@ -477,7 +477,7 @@ class DocumentIRService:
         elif picture_candidates:
             for index, picture in enumerate(picture_candidates, 1):
                 regions.append(
-                    RegionIR(
+                    ContentRegion(
                         region_id=f"{page_id}-image-{index}",
                         unit_id=page_id,
                         region_type=RegionType.IMAGE,
@@ -488,7 +488,7 @@ class DocumentIRService:
                 )
         elif "<!-- image -->" in str(getattr(page, "content", "") or ""):
             regions.append(
-                RegionIR(
+                ContentRegion(
                     region_id=f"{page_id}-image",
                     unit_id=page_id,
                     region_type=RegionType.IMAGE,
@@ -517,7 +517,7 @@ class DocumentIRService:
                 else QualityVerdict.TRUSTED.value
             )
         )
-        return ContentUnitIR(
+        return ContentUnit(
             unit_id=page_id,
             unit_type=UnitType.PAGE,
             index=page_number,

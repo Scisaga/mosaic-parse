@@ -1,6 +1,6 @@
 # Architecture
 
-MosaicParse 是多模态内容证据层，不是业务信息抽取层。FastAPI 服务保持 CPU-only；
+MosaicParse 是多模态内容解析层，不是业务信息抽取层。FastAPI 服务保持 CPU-only；
 GLM-OCR 和 Qwen 是可选远程模型后端。
 
 ```text
@@ -21,10 +21,10 @@ Real-format router (magic / OOXML / FFprobe)
           +--> standalone video --------> bounded FFmpeg keyframes + VLM
                                       |
                                       v
-                        unit/region/table/asset evidence
+                        unit/region/table/asset result
                                       |
                                       v
-                     ContentEvidenceIR v1 (primary)
+                     ContentParseResult v1 (primary)
                            |                    |
                            v                    v
                   Markdown renderer      plain-text renderer
@@ -44,7 +44,7 @@ Real-format router (magic / OOXML / FFprobe)
 - 签章、印章、手写、图片资产与正文的分离；
 - 独立视频的实测元数据、场景候选、关键帧与采样限定摘要；
 - 结构质量、未解决冲突和运行测量；
-- 从 IR 派生 Markdown / Plain Text。
+- 从解析结果派生 Markdown / Plain Text。
 
 本项目不负责：
 
@@ -53,7 +53,7 @@ Real-format router (magic / OOXML / FFprobe)
 - 事件时间、参与者和数值角色的领域解释；
 - Embedding、切块、索引、问答、领域总结和长期资产管理。
 
-EventRail 应保存 `content_id/unit_id/region_id/table_id/cell_id/asset_id` 作为证据引用，
+EventRail 应保存 `content_id/unit_id/region_id/table_id/cell_id/asset_id` 作为来源引用，
 并独立演进领域 ontology。解析器升级不会直接改写 ER 的事件定义。
 
 ## 唯一公共路由
@@ -74,20 +74,20 @@ Qwen 负责区域语义、方向、表格拓扑、行列归属、可见值读取
 
 单页最多 3 次 Qwen 请求、总预算 180 秒。区域读取最多 16K 输出 token，模型别名
 使用 32K context。结构化响应经 JSON Schema 和 Pydantic 双重校验。reasoning 仅
-用于模型内部推理与长度测量，不进入 IR、API 或日志。
+用于模型内部推理与长度测量，不进入公共结果、API 或日志。
 
-## ContentEvidenceIR
+## ContentParseResult
 
-稳定契约位于 `app/models/document_ir.py`，版本为 `content-evidence/1.0`。核心关系：
+稳定契约位于 `app/models/content_result.py`，版本为 `content-parse-result/1.0`。核心关系：
 
 ```text
-document
+content
 source
   units[]
     regions[]  -> block_ids[] / table_ids[]
-    blocks[]   -> bbox + reading_order + evidence
+    blocks[]   -> bbox + reading_order + provenance
   tables[]
-    cells[]    -> row/column/span/bbox/text/evidence
+    cells[]    -> row/column/span/bbox/text/provenance
   logical_tables[] -> fragment_table_ids[] + source_units[]
   assets[]          -> SHA256 + locations[] + visual_analysis
   video_analysis    -> scenes[] + keyframes[]
@@ -97,7 +97,7 @@ source
 ```
 
 未知坐标或测量保持 `null`，不能伪造为零。原始媒体通过鉴权资产接口返回；prompt、
-reasoning 和未采用候选正文不进入公共 IR 或日志。
+reasoning 和未采用候选正文不进入公共结果或日志。
 
 ## 持久化
 

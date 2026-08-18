@@ -116,13 +116,13 @@ def _make_office(output: Path) -> None:
     document.add_heading("MosaicParse DOCX fixture", 0)
     document.add_paragraph("This original fixture contains one embedded image.")
     document.add_picture(str(image), width=Inches(4.5))
-    document.save(output / "embedded-image.docx")
+    document.save(str(output / "embedded-image.docx"))
 
     presentation = Presentation()
     slide = presentation.slides.add_slide(presentation.slide_layouts[5])
     slide.shapes.title.text = "MosaicParse PPTX fixture"
     slide.shapes.add_picture(str(image), Inches(1), Inches(1.7), width=Inches(6))
-    presentation.save(output / "embedded-image.pptx")
+    presentation.save(str(output / "embedded-image.pptx"))
 
     video_presentation = Presentation()
     video_slide = video_presentation.slides.add_slide(video_presentation.slide_layouts[5])
@@ -136,7 +136,7 @@ def _make_office(output: Path) -> None:
         poster_frame_image=str(image),
         mime_type="video/mp4",
     )
-    video_presentation.save(output / "embedded-video.pptx")
+    video_presentation.save(str(output / "embedded-video.pptx"))
 
 
 def _new_pdf() -> pymupdf.Document:

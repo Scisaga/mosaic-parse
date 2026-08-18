@@ -86,7 +86,7 @@ class JobRecord(BaseModel):
     started_at: datetime | None = None
     completed_at: datetime | None = None
     expires_at: datetime | None = None
-    result_ir_path: str | None = None
+    result_path: str | None = None
     result_markdown_path: str | None = None
     result_text_path: str | None = None
     error: JobError | None = None

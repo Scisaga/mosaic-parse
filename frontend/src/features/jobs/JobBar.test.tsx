@@ -23,7 +23,7 @@ describe('JobBar progress phases', () => {
     expect(screen.queryByText('2/5 页面')).not.toBeInTheDocument()
 
     rerender(<JobBar job={jobWithPhase('postprocess.visual_fusion')} {...callbacks} />)
-    expect(screen.getByText('2/5 融合视觉证据')).toBeInTheDocument()
+    expect(screen.getByText('2/5 融合视觉结果')).toBeInTheDocument()
     expect(screen.queryByText('2/5 页面')).not.toBeInTheDocument()
   })
 })

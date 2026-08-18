@@ -1,3 +1,3 @@
-"""MosaicParse multimodal content evidence service."""
+"""MosaicParse multimodal content parsing service."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

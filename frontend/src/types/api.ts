@@ -5,7 +5,7 @@ export type UnitStatus = 'completed' | 'warning' | 'failed'
 export type QualityVerdict = 'trusted' | 'degraded' | 'untrusted'
 export type UnitType = 'page' | 'slide' | 'document_body' | 'image' | 'video'
 export type RegionType = 'text' | 'heading' | 'table' | 'image' | 'signature' | 'seal' | 'handwriting' | 'formula' | 'unknown'
-export type EvidenceSourceKind = 'native' | 'docling' | 'glm' | 'qwen' | 'ffmpeg' | 'ooxml'
+export type ProvenanceSourceKind = 'native' | 'docling' | 'glm' | 'qwen' | 'ffmpeg' | 'ooxml'
 export type ElementQuality = 'complete' | 'confirmed' | 'selected' | 'conflicted' | 'missing' | 'truncated'
 
 export interface ParseOptions {
@@ -30,14 +30,14 @@ export interface NormalizedBBox {
   bottom: number
 }
 
-export interface ElementEvidence {
-  selected_source: EvidenceSourceKind | null
-  supporting_sources: EvidenceSourceKind[]
-  sources: Array<{ source: EvidenceSourceKind; backend: string | null }>
+export interface ElementProvenance {
+  selected_source: ProvenanceSourceKind | null
+  supporting_sources: ProvenanceSourceKind[]
+  sources: Array<{ source: ProvenanceSourceKind; backend: string | null }>
   reason_codes: string[]
 }
 
-export interface TextBlockIR {
+export interface TextBlock {
   block_id: string
   unit_id: string
   region_id: string
@@ -46,10 +46,10 @@ export interface TextBlockIR {
   reading_order: number
   text: string
   quality: ElementQuality
-  evidence: ElementEvidence
+  provenance: ElementProvenance
 }
 
-export interface RegionIR {
+export interface ContentRegion {
   region_id: string
   unit_id: string
   region_type: RegionType
@@ -61,7 +61,7 @@ export interface RegionIR {
   quality: ElementQuality
 }
 
-export interface TableCellIR {
+export interface TableCell {
   cell_id: string
   row: number
   column: number
@@ -72,10 +72,10 @@ export interface TableCellIR {
   is_column_header: boolean
   is_row_header: boolean
   quality: ElementQuality
-  evidence: ElementEvidence
+  provenance: ElementProvenance
 }
 
-export interface TableIR {
+export interface ParsedTable {
   table_id: string
   unit_id: string
   region_id: string
@@ -86,13 +86,13 @@ export interface TableIR {
   row_count: number
   column_count: number
   header_rows: number[]
-  cells: TableCellIR[]
+  cells: TableCell[]
   logical_table_id: string | null
   quality: ElementQuality
   reason_codes: string[]
 }
 
-export interface ContentUnitIR {
+export interface ContentUnit {
   unit_id: string
   unit_type: UnitType
   index: number
@@ -100,8 +100,8 @@ export interface ContentUnitIR {
   height: number | null
   rotation_degrees: 0 | 90 | 180 | 270 | null
   status: UnitStatus
-  regions: RegionIR[]
-  blocks: TextBlockIR[]
+  regions: ContentRegion[]
+  blocks: TextBlock[]
   table_ids: string[]
   asset_ids: string[]
   renderings: { markdown: string; plain_text: string }
@@ -122,7 +122,7 @@ export interface ContentUnitIR {
   duration_ms: number
 }
 
-export interface VisualAnalysisIR {
+export interface VisualAnalysis {
   classification: 'document' | 'visual' | 'mixed' | 'unknown'
   summary: string
   detailed_description: string
@@ -135,7 +135,7 @@ export interface VisualAnalysisIR {
   uncertainties: string[]
 }
 
-export interface AssetIR {
+export interface ContentAsset {
   asset_id: string
   kind: 'image' | 'video'
   role: 'source' | 'embedded_image' | 'page_crop' | 'preview' | 'keyframe'
@@ -156,13 +156,13 @@ export interface AssetIR {
     relationship_id: string | null
     placement_id: string | null
   }>
-  visual_analysis: VisualAnalysisIR | null
+  visual_analysis: VisualAnalysis | null
   status: 'ready' | 'partial' | 'failed'
   warning_codes: string[]
   download_url: string
 }
 
-export interface IRWarning {
+export interface ParseWarning {
   code: string
   severity: 'info' | 'warning' | 'error'
   unit_index: number | null
@@ -171,9 +171,9 @@ export interface IRWarning {
   count: number | null
 }
 
-export interface ContentEvidenceIR {
-  object: 'content.evidence'
-  schema_version: 'content-evidence/1.0'
+export interface ContentParseResult {
+  object: 'content.parse_result'
+  schema_version: 'content-parse-result/1.0'
   status: 'completed' | 'partial'
   source: {
     content_id: string
@@ -189,16 +189,16 @@ export interface ContentEvidenceIR {
     width: number | null
     height: number | null
   }
-  units: ContentUnitIR[]
-  assets: AssetIR[]
-  tables: TableIR[]
+  units: ContentUnit[]
+  assets: ContentAsset[]
+  tables: ParsedTable[]
   logical_tables: Array<{
     logical_table_id: string
     fragment_table_ids: string[]
     source_units: number[]
     header_policy: 'first_fragment'
   }>
-  visual_analysis: VisualAnalysisIR | null
+  visual_analysis: VisualAnalysis | null
   video_analysis: {
     duration_ms: number
     width: number
@@ -208,7 +208,7 @@ export interface ContentEvidenceIR {
     visual_only: true
     summary: string
     scenes: Array<{ scene_id: string; start_ms: number; end_ms: number; keyframe_asset_ids: string[] }>
-    keyframes: Array<{ asset_id: string; timestamp_ms: number; scene_id: string | null; visual_analysis: VisualAnalysisIR }>
+    keyframes: Array<{ asset_id: string; timestamp_ms: number; scene_id: string | null; visual_analysis: VisualAnalysis }>
   } | null
   renderings: { markdown: string; plain_text: string }
   diagnostics: {
@@ -219,7 +219,7 @@ export interface ContentEvidenceIR {
     visual_units: number
     unresolved_visual_conflicts: number
   }
-  warnings: IRWarning[]
+  warnings: ParseWarning[]
   runtime: {
     profile: ParseProfile
     primary_backend: string
@@ -235,7 +235,7 @@ export interface ContentEvidenceIR {
   created_at: string
 }
 
-export type ParseResult = ContentEvidenceIR
+export type ParseResult = ContentParseResult
 
 export interface JobProgress {
   current: number
@@ -311,7 +311,7 @@ export interface JobEvent {
 }
 
 export interface ResultBundle {
-  evidence: ContentEvidenceIR
+  result: ContentParseResult
   markdown: string
   text: string
 }

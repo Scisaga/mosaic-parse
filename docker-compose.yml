@@ -5,7 +5,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ${MOSAICPARSE_IMAGE:-ghcr.io/scisaga/mosaic-parse:0.3.0}
+    image: ${MOSAICPARSE_IMAGE:-ghcr.io/scisaga/mosaic-parse:0.4.0}
     container_name: mosaicparse
     restart: unless-stopped
     init: true
@@ -98,7 +98,7 @@ services:
       context: .
       dockerfile: Dockerfile.glm-sdk
       args:
-        PARSER_IMAGE: ${MOSAICPARSE_IMAGE:-ghcr.io/scisaga/mosaic-parse:0.3.0}
+        PARSER_IMAGE: ${MOSAICPARSE_IMAGE:-ghcr.io/scisaga/mosaic-parse:0.4.0}
     image: ${GLM_SDK_IMAGE:-docling-glm-ocr-sdk:0.1.5}
     container_name: docling_glm_ocr_sdk
     restart: unless-stopped

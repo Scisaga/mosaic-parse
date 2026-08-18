@@ -45,6 +45,15 @@ def validate(schema: dict[str, Any]) -> None:
         raise SystemExit(f"OpenAPI schema is missing required paths: {sorted(missing)}")
     if schema.get("info", {}).get("title") != "MosaicParse":
         raise SystemExit("OpenAPI title is not MosaicParse")
+    schemas = schema.get("components", {}).get("schemas", {})
+    if "ContentParseResult" not in schemas:
+        raise SystemExit("OpenAPI does not expose ContentParseResult")
+    retired = {name for name in schemas if name.endswith("IR")}
+    if retired:
+        raise SystemExit(f"OpenAPI exposes retired public IR models: {sorted(retired)}")
+    block_properties = schemas.get("TextBlock", {}).get("properties", {})
+    if "provenance" not in block_properties or "evidence" in block_properties:
+        raise SystemExit("TextBlock does not expose the provenance contract")
 
 
 def main() -> int:

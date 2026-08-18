@@ -14,8 +14,8 @@ from fastapi.responses import FileResponse, StreamingResponse
 from app.api.dependencies import get_runtime, require_api_key
 from app.api.schemas import DeleteJobResponse, JobResponse
 from app.models import (
-    AssetIR,
-    ContentEvidenceIR,
+    ContentAsset,
+    ContentParseResult,
     JobEvent,
     JobRecord,
     JobStatus,
@@ -93,17 +93,17 @@ def _download_headers(filename: str, suffix: str) -> dict[str, str]:
 
 @router.get(
     "/{job_id}/result",
-    response_model=ContentEvidenceIR,
-    summary="Read the completed content-evidence IR",
+    response_model=ContentParseResult,
+    summary="Read the completed content parse result",
 )
 async def get_content_result(
     job_id: str,
     request: Request,
     download: Annotated[bool, Query()] = False,
-) -> ContentEvidenceIR | Response:
+) -> ContentParseResult | Response:
     service = get_runtime(request).job_service
     record = await service.get_job(job_id)
-    result = await service.get_evidence(job_id)
+    result = await service.get_parse_result(job_id)
     if not download:
         return result
     return Response(
@@ -155,9 +155,9 @@ async def delete_content_job(job_id: str, request: Request) -> DeleteJobResponse
     return DeleteJobResponse(id=job_id, status="deleted")
 
 
-@router.get("/{job_id}/assets", response_model=list[AssetIR], summary="List content assets")
-async def get_content_assets(job_id: str, request: Request) -> list[AssetIR]:
-    return (await get_runtime(request).job_service.get_evidence(job_id)).assets
+@router.get("/{job_id}/assets", response_model=list[ContentAsset], summary="List content assets")
+async def get_content_assets(job_id: str, request: Request) -> list[ContentAsset]:
+    return (await get_runtime(request).job_service.get_parse_result(job_id)).assets
 
 
 def _parse_range(value: str, size: int) -> tuple[int, int]:
@@ -189,8 +189,8 @@ def _parse_range(value: str, size: int) -> tuple[int, int]:
 @router.get("/{job_id}/assets/{asset_id}", summary="Download a content asset")
 async def get_content_asset(job_id: str, asset_id: str, request: Request) -> Response:
     service = get_runtime(request).job_service
-    evidence = await service.get_evidence(job_id)
-    asset = next((item for item in evidence.assets if item.asset_id == asset_id), None)
+    parse_result = await service.get_parse_result(job_id)
+    asset = next((item for item in parse_result.assets if item.asset_id == asset_id), None)
     if asset is None:
         raise ServiceError("asset_not_found", "asset does not exist", status_code=404)
     try:
@@ -231,13 +231,13 @@ async def get_content_asset(job_id: str, asset_id: str, request: Request) -> Res
     return StreamingResponse(stream(), status_code=206, media_type=asset.mime_type, headers=headers)
 
 
-@router.get("/{job_id}/bundle", summary="Download the content evidence bundle")
+@router.get("/{job_id}/bundle", summary="Download the parsed-content asset bundle")
 async def get_content_bundle(job_id: str, request: Request) -> FileResponse:
     service = get_runtime(request).job_service
     record = await service.get_job(job_id)
     if record.status not in {JobStatus.COMPLETED, JobStatus.PARTIAL}:
         raise ServiceError("result_not_ready", "job result is not available", status_code=409)
-    await service.get_evidence(job_id)
+    await service.get_parse_result(job_id)
     path = await service.storage.build_bundle(job_id)
     return FileResponse(
         path,

@@ -69,7 +69,7 @@ export function ParseOptionsForm({ options, onChange, onSubmit, sourceReady, bus
         <div className="options-title section-heading-copy">
           <span className="eyebrow">02 · 解析策略</span>
           <h2 id="options-heading">解析设置</h2>
-          <p>服务自动选择文档、视觉或视频链路，主结果始终是结构化内容证据 IR。</p>
+          <p>服务自动选择文档、视觉或视频链路，并生成统一的结构化解析结果。</p>
         </div>
         <button ref={advancedButtonRef} className="advanced-toggle" type="button" aria-haspopup="dialog" aria-expanded={advanced} aria-controls="advanced-options-dialog" onClick={() => setAdvanced((value) => !value)}>
           <SettingsIcon /> 高级设置

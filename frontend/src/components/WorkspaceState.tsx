@@ -31,17 +31,19 @@ export function WorkspaceState({ variant, contentKind, title, description, role,
       aria-live={live}
       aria-busy={busy || undefined}
     >
-      <img
-        className={`workspace-state-art workspace-state-art-${scene}`}
-        src={`/illustrations/workspace-${scene}.png`}
-        width="640"
-        height="512"
-        alt=""
-        aria-hidden="true"
-        draggable={false}
-        decoding="async"
-        data-scene={scene}
-      />
+      <span className="workspace-state-art-frame" aria-hidden="true">
+        <img
+          className={`workspace-state-art workspace-state-art-${scene}`}
+          src={`/illustrations/workspace-${scene}.png`}
+          width="640"
+          height="512"
+          alt=""
+          aria-hidden="true"
+          draggable={false}
+          decoding="async"
+          data-scene={scene}
+        />
+      </span>
       {title && <strong>{title}</strong>}
       <p>{description}</p>
     </div>

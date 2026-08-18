@@ -55,6 +55,7 @@ RUN apt-get update \
 
 COPY --from=python-deps --chown=app:app /app/.venv /app/.venv
 COPY --chown=app:app app/ ./app/
+COPY --chown=app:app scripts/purge_job_data.py ./scripts/purge_job_data.py
 COPY --from=frontend-builder --chown=app:app /build/frontend/dist/ ./static/
 COPY --chown=app:app README.md LICENSE ./
 

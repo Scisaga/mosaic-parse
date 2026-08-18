@@ -1,4 +1,4 @@
-"""Stable, domain-neutral multimodal content evidence contract."""
+"""Stable, domain-neutral multimodal content parse-result contract."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ class ElementQuality(StrEnum):
     TRUNCATED = "truncated"
 
 
-class EvidenceSourceKind(StrEnum):
+class ProvenanceSourceKind(StrEnum):
     NATIVE = "native"
     DOCLING = "docling"
     GLM = "glm"
@@ -102,23 +102,23 @@ class NormalizedBBox(BaseModel):
         return self
 
 
-class EvidenceSource(BaseModel):
+class ProvenanceSource(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    source: EvidenceSourceKind
+    source: ProvenanceSourceKind
     backend: str | None = None
 
 
-class ElementEvidence(BaseModel):
+class ElementProvenance(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    selected_source: EvidenceSourceKind | None = None
-    supporting_sources: list[EvidenceSourceKind] = Field(default_factory=list)
-    sources: list[EvidenceSource] = Field(default_factory=list)
+    selected_source: ProvenanceSourceKind | None = None
+    supporting_sources: list[ProvenanceSourceKind] = Field(default_factory=list)
+    sources: list[ProvenanceSource] = Field(default_factory=list)
     reason_codes: list[str] = Field(default_factory=list)
 
 
-class TextBlockIR(BaseModel):
+class TextBlock(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     block_id: str
@@ -129,10 +129,10 @@ class TextBlockIR(BaseModel):
     reading_order: int = Field(ge=0)
     text: str
     quality: ElementQuality = ElementQuality.COMPLETE
-    evidence: ElementEvidence = Field(default_factory=ElementEvidence)
+    provenance: ElementProvenance = Field(default_factory=ElementProvenance)
 
 
-class RegionIR(BaseModel):
+class ContentRegion(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     region_id: str
@@ -146,7 +146,7 @@ class RegionIR(BaseModel):
     quality: ElementQuality = ElementQuality.COMPLETE
 
 
-class TableCellIR(BaseModel):
+class TableCell(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     cell_id: str
@@ -159,10 +159,10 @@ class TableCellIR(BaseModel):
     is_column_header: bool = False
     is_row_header: bool = False
     quality: ElementQuality = ElementQuality.COMPLETE
-    evidence: ElementEvidence = Field(default_factory=ElementEvidence)
+    provenance: ElementProvenance = Field(default_factory=ElementProvenance)
 
 
-class TableIR(BaseModel):
+class ParsedTable(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     table_id: str
@@ -175,13 +175,13 @@ class TableIR(BaseModel):
     row_count: int = Field(ge=0)
     column_count: int = Field(ge=0)
     header_rows: list[int] = Field(default_factory=list)
-    cells: list[TableCellIR] = Field(default_factory=list)
+    cells: list[TableCell] = Field(default_factory=list)
     logical_table_id: str | None = None
     quality: ElementQuality = ElementQuality.COMPLETE
     reason_codes: list[str] = Field(default_factory=list)
 
 
-class LogicalTableIR(BaseModel):
+class LogicalTable(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     logical_table_id: str
@@ -221,7 +221,7 @@ class UnitDiagnostics(BaseModel):
     truncated_calls: int | None = Field(default=None, ge=0)
 
 
-class ContentUnitIR(BaseModel):
+class ContentUnit(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     unit_id: str
@@ -231,8 +231,8 @@ class ContentUnitIR(BaseModel):
     width: float | None = Field(default=None, gt=0)
     height: float | None = Field(default=None, gt=0)
     rotation_degrees: Literal[0, 90, 180, 270] | None = None
-    regions: list[RegionIR] = Field(default_factory=list)
-    blocks: list[TextBlockIR] = Field(default_factory=list)
+    regions: list[ContentRegion] = Field(default_factory=list)
+    blocks: list[TextBlock] = Field(default_factory=list)
     table_ids: list[str] = Field(default_factory=list)
     asset_ids: list[str] = Field(default_factory=list)
     renderings: ContentRenderings = Field(default_factory=ContentRenderings)
@@ -240,7 +240,7 @@ class ContentUnitIR(BaseModel):
     duration_ms: int = Field(default=0, ge=0)
 
 
-class ContentSourceIR(BaseModel):
+class ContentSource(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     content_id: str
@@ -257,7 +257,7 @@ class ContentSourceIR(BaseModel):
     height: int | None = Field(default=None, gt=0)
 
 
-class AssetLocationIR(BaseModel):
+class AssetLocation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     unit_id: str | None = None
@@ -269,7 +269,7 @@ class AssetLocationIR(BaseModel):
     placement_id: str | None = None
 
 
-class VisualAnalysisIR(BaseModel):
+class VisualAnalysis(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     classification: VisualClassification
@@ -284,7 +284,7 @@ class VisualAnalysisIR(BaseModel):
     uncertainties: list[str] = Field(default_factory=list)
 
 
-class AssetIR(BaseModel):
+class ContentAsset(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     asset_id: str
@@ -298,14 +298,14 @@ class AssetIR(BaseModel):
     height: int | None = Field(default=None, gt=0)
     duration_ms: int | None = Field(default=None, ge=0)
     parent_asset_id: str | None = None
-    locations: list[AssetLocationIR] = Field(default_factory=list)
-    visual_analysis: VisualAnalysisIR | None = None
+    locations: list[AssetLocation] = Field(default_factory=list)
+    visual_analysis: VisualAnalysis | None = None
     status: AssetStatus = AssetStatus.READY
     warning_codes: list[str] = Field(default_factory=list)
     download_url: str
 
 
-class VideoSceneIR(BaseModel):
+class VideoScene(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     scene_id: str
@@ -314,22 +314,22 @@ class VideoSceneIR(BaseModel):
     keyframe_asset_ids: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def ordered(self) -> VideoSceneIR:
+    def ordered(self) -> VideoScene:
         if self.end_ms < self.start_ms:
             raise ValueError("video scene end must not precede start")
         return self
 
 
-class VideoKeyframeIR(BaseModel):
+class VideoKeyframe(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     asset_id: str
     timestamp_ms: int = Field(ge=0)
     scene_id: str | None = None
-    visual_analysis: VisualAnalysisIR
+    visual_analysis: VisualAnalysis
 
 
-class VideoAnalysisIR(BaseModel):
+class VideoAnalysis(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     duration_ms: int = Field(ge=0)
@@ -339,11 +339,11 @@ class VideoAnalysisIR(BaseModel):
     frame_rate: float | None = Field(default=None, gt=0)
     visual_only: Literal[True] = True
     summary: str
-    scenes: list[VideoSceneIR] = Field(default_factory=list)
-    keyframes: list[VideoKeyframeIR] = Field(default_factory=list)
+    scenes: list[VideoScene] = Field(default_factory=list)
+    keyframes: list[VideoKeyframe] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def ordered_and_bounded(self) -> VideoAnalysisIR:
+    def ordered_and_bounded(self) -> VideoAnalysis:
         timestamps = [item.timestamp_ms for item in self.keyframes]
         if timestamps != sorted(timestamps):
             raise ValueError("video keyframe timestamps must be monotonic")
@@ -365,7 +365,7 @@ class ContentQualitySummary(BaseModel):
     unresolved_visual_conflicts: int = Field(default=0, ge=0)
 
 
-class ParseRuntimeIR(BaseModel):
+class ParseRuntime(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     profile: Literal["fast", "balanced", "accurate"]
@@ -379,7 +379,7 @@ class ParseRuntimeIR(BaseModel):
     ffmpeg_duration_ms: int | None = Field(default=None, ge=0)
 
 
-class IRWarning(BaseModel):
+class ParseWarning(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     code: str
@@ -390,7 +390,7 @@ class IRWarning(BaseModel):
     count: int | None = Field(default=None, ge=0)
 
 
-class ContentLinksIR(BaseModel):
+class ContentLinks(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     job: str
@@ -400,24 +400,24 @@ class ContentLinksIR(BaseModel):
     bundle: str
 
 
-class ContentEvidenceIR(BaseModel):
+class ContentParseResult(BaseModel):
     """Primary parse product consumed by external retrieval systems."""
 
     model_config = ConfigDict(extra="forbid")
 
-    object: Literal["content.evidence"] = "content.evidence"
-    schema_version: Literal["content-evidence/1.0"] = "content-evidence/1.0"
+    object: Literal["content.parse_result"] = "content.parse_result"
+    schema_version: Literal["content-parse-result/1.0"] = "content-parse-result/1.0"
     status: Literal["completed", "partial"] = "completed"
-    source: ContentSourceIR
-    units: list[ContentUnitIR]
-    assets: list[AssetIR] = Field(default_factory=list)
-    tables: list[TableIR] = Field(default_factory=list)
-    logical_tables: list[LogicalTableIR] = Field(default_factory=list)
-    visual_analysis: VisualAnalysisIR | None = None
-    video_analysis: VideoAnalysisIR | None = None
+    source: ContentSource
+    units: list[ContentUnit]
+    assets: list[ContentAsset] = Field(default_factory=list)
+    tables: list[ParsedTable] = Field(default_factory=list)
+    logical_tables: list[LogicalTable] = Field(default_factory=list)
+    visual_analysis: VisualAnalysis | None = None
+    video_analysis: VideoAnalysis | None = None
     renderings: ContentRenderings = Field(default_factory=ContentRenderings)
     diagnostics: ContentQualitySummary = Field(default_factory=ContentQualitySummary)
-    warnings: list[IRWarning] = Field(default_factory=list)
-    runtime: ParseRuntimeIR
-    links: ContentLinksIR
+    warnings: list[ParseWarning] = Field(default_factory=list)
+    runtime: ParseRuntime
+    links: ContentLinks
     created_at: datetime = Field(default_factory=utc_now)

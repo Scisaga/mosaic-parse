@@ -22,7 +22,7 @@ const STATUS_LABEL: Record<ContentJob['status'], string> = {
 
 function progressPhaseLabel(phase?: string | null): string {
   if (phase === 'postprocess.text_repair') return '修复文字'
-  if (phase === 'postprocess.visual_fusion') return '融合视觉证据'
+  if (phase === 'postprocess.visual_fusion') return '融合视觉结果'
   if (phase === 'page_pipeline') return '页面流水线'
   if (phase?.startsWith('page.')) return '生成结果'
   return '页面'

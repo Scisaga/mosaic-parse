@@ -1,21 +1,21 @@
 # MosaicParse 产品与工程规格
 
-> 当前契约：`content-evidence/1.0`
+> 当前契约：`content-parse-result/1.0`
 >
 > 服务端口：`12303`
 >
-> 主结果：`ContentEvidenceIR`
+> 主结果：`ContentParseResult`
 
 ## 1. 产品目标
 
-MosaicParse 把 PDF、DOCX、PPTX、图片和独立视频转换为可追溯的结构化内容证据。它回答：
+MosaicParse 把 PDF、DOCX、PPTX、图片和独立视频转换为可追溯的结构化解析结果。它回答：
 
 - 页、幻灯片、图片或采样视频帧上有哪些结构与视觉元素；
 - 它们位于哪里、阅读顺序、出现位置或时间戳如何；
 - 值来自原生 PDF、Docling、GLM 还是 Qwen；
 - 哪些结构完整、哪些仍有冲突或缺失。
 
-Markdown / Plain Text 是从证据结构生成的便利视图，不是产品的语义终点。
+Markdown / Plain Text 是从解析结构生成的便利视图，不是产品的语义终点。
 
 ## 2. 与 EventRail 的边界
 
@@ -54,7 +54,7 @@ prefer_async                  # 仅 /parse
 
 路由规则：
 
-- `fast/balanced`：文档使用 Docling/GLM 自动证据路径；
+- `fast/balanced`：文档使用 Docling/GLM 自动解析路径；
 - `accurate`：文档中的复杂视觉结构可执行区域视觉融合；
 - 纯视觉图片和独立视频始终需要服务端配置的 VLM；
 - 文档内嵌图片失败使父结果为 `partial`，内嵌视频完全忽略；
@@ -62,11 +62,11 @@ prefer_async                  # 仅 /parse
 
 ## 4. 主结果
 
-`ContentEvidenceIR` 顶层字段：
+`ContentParseResult` 顶层字段：
 
 ```text
-object = content.evidence
-schema_version = content-evidence/1.0
+object = content.parse_result
+schema_version = content-parse-result/1.0
 status
 source
 units[]
@@ -88,7 +88,7 @@ created_at
 角色、父资产、出现位置、处理状态和鉴权 URL。视频分析只陈述采样关键帧可见内容，
 不含音频证据。未知值使用 `null`；不得用零代表未知测量。
 
-公共 IR 不保存候选正文、图像、prompt、reasoning 或业务推断。
+公共解析结果不保存候选正文、图像、prompt、reasoning 或业务推断。
 
 ## 5. 视觉融合
 
@@ -99,8 +99,8 @@ Qwen 提供方向、区域语义、拓扑、行列归属、可见值读取与冲
 
 - 不执行整页 Markdown 替换；
 - 按区域和单元格装配；
-- 左右并表生成独立 TableIR；
-- 签章、印章、手写证据不混入打印正文；
+- 左右并表生成独立 ParsedTable；
+- 签章、印章、手写内容不混入打印正文；
 - 单页最多 3 次 Qwen、180 秒；
 - 32K context，规划 4K、区域 16K、冲突 8K 输出预算；
 - JSON Schema 强制结构化响应，并经 Pydantic 再校验。
@@ -143,7 +143,7 @@ POST /v1/content/jobs/{id}/retry
 DELETE /v1/content/jobs/{id}
 ```
 
-MCP：`parse_content`、`get_content_job`、`get_content_evidence`、
+MCP：`parse_content`、`get_content_job`、`get_content_result`、
 `get_content_rendering`、`get_content_assets`；资源 scheme 为 `mosaicparse://`。
 
 ## 8. 验收
@@ -157,6 +157,6 @@ MCP：`parse_content`、`get_content_job`、`get_content_evidence`、
 - 资产下载字节与 SHA256 一致，视频 Range、bundle 与过期清理可验证；
 - `balanced` 原生页不产生 Qwen 调用；
 - `accurate` 复杂视觉页不超过 3 次/180 秒；
-- IR 保留同页非表正文、图片/签章证据、cell span 和跨页 table provenance；
+- 解析结果保留同页非表正文、图片/签章内容、cell span 和跨页 table provenance；
 - 数字、符号、单位和日期不得相对真值退化；
 - 私有 PDF、manifest 和运行结果不进入 Git。

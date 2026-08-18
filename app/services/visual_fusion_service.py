@@ -26,7 +26,7 @@ from app.models.parse_result import (
     PageDiagnostics,
     PageParseResult,
     PageStatus,
-    ParseWarning,
+    PipelineWarning,
     QualityVerdict,
     SelectionStrategy,
     VisualFusionDiagnostics,
@@ -1274,7 +1274,7 @@ class VisualFusionService:
             max_calls=self.max_calls,
             deadline=time.monotonic() + self.page_budget_seconds,
         )
-        warnings: list[ParseWarning] = []
+        warnings: list[PipelineWarning] = []
         image = await self.qwen._render(source, primary.page_number, options.profile.value)
         rotation = evidence.detected_rotation_degrees
         if rotation is None:
@@ -1284,7 +1284,7 @@ class VisualFusionService:
                 budget.truncated_calls += 1
                 rotation = 0
                 warnings.append(
-                    ParseWarning(
+                    PipelineWarning(
                         code="qwen_response_truncated",
                         message="Qwen exhausted the orientation planning budget",
                         page_number=primary.page_number,
@@ -1295,7 +1295,7 @@ class VisualFusionService:
             except TimeoutError:
                 rotation = 0
                 warnings.append(
-                    ParseWarning(
+                    PipelineWarning(
                         code="visual_fusion_timeout",
                         message="visual fusion exhausted its budget during orientation planning",
                         page_number=primary.page_number,
@@ -1306,7 +1306,7 @@ class VisualFusionService:
             except (ParserError, ValueError):
                 rotation = 0
                 warnings.append(
-                    ParseWarning(
+                    PipelineWarning(
                         code="visual_fusion_partial",
                         message="visual orientation remained unresolved",
                         page_number=primary.page_number,
@@ -1392,7 +1392,7 @@ class VisualFusionService:
                 if budget.can_call:
                     pending_bands = self._split_bands(band, 2) + pending_bands
                 warnings.append(
-                    ParseWarning(
+                    PipelineWarning(
                         code="qwen_response_truncated",
                         message="Qwen exhausted the structured-output budget for a visual partition",
                         page_number=primary.page_number,
@@ -1402,7 +1402,7 @@ class VisualFusionService:
                 )
             except TimeoutError:
                 warnings.append(
-                    ParseWarning(
+                    PipelineWarning(
                         code="visual_fusion_timeout",
                         message="visual fusion exhausted the per-page time budget",
                         page_number=primary.page_number,
@@ -1413,7 +1413,7 @@ class VisualFusionService:
                 break
             except (ParserError, ValueError):
                 warnings.append(
-                    ParseWarning(
+                    PipelineWarning(
                         code="visual_fusion_partial",
                         message="a Qwen visual partition returned no schema-valid final content",
                         page_number=primary.page_number,
@@ -1441,7 +1441,7 @@ class VisualFusionService:
             )
         if unresolved:
             warnings.append(
-                ParseWarning(
+                PipelineWarning(
                     code="unresolved_visual_conflict",
                     message="some visual cell conflicts remain after regional fusion",
                     page_number=primary.page_number,
@@ -1452,7 +1452,7 @@ class VisualFusionService:
         fragments = self._render_fragments(primary.page_number, tables)
         if not fragments:
             warnings.append(
-                ParseWarning(
+                PipelineWarning(
                     code="visual_fusion_partial",
                     message="visual fusion produced no complete table region",
                     page_number=primary.page_number,
@@ -1563,7 +1563,7 @@ class VisualFusionService:
             "invent IDs. OCR candidates: "
             f"{json.dumps(ocr_line_candidates, ensure_ascii=False, separators=(',', ':'))}."
         )
-        warnings: list[ParseWarning] = []
+        warnings: list[PipelineWarning] = []
         signature: VisualSignatureExtraction | None = None
         try:
             completion = await self._structured_call(
@@ -1579,7 +1579,7 @@ class VisualFusionService:
         except VlmResponseTruncatedError:
             budget.truncated_calls += 1
             warnings.append(
-                ParseWarning(
+                PipelineWarning(
                     code="qwen_response_truncated",
                     message="Qwen exhausted the signature-page structured-output budget",
                     page_number=primary.page_number,
@@ -1589,7 +1589,7 @@ class VisualFusionService:
             )
         except TimeoutError:
             warnings.append(
-                ParseWarning(
+                PipelineWarning(
                     code="visual_fusion_timeout",
                     message="signature-page visual fusion exhausted its time budget",
                     page_number=primary.page_number,
@@ -1599,7 +1599,7 @@ class VisualFusionService:
             )
         except (ParserError, ValueError):
             warnings.append(
-                ParseWarning(
+                PipelineWarning(
                     code="visual_fusion_partial",
                     message="signature-page visual reasoning returned no schema-valid result",
                     page_number=primary.page_number,
