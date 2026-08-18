@@ -52,6 +52,9 @@ a { color: inherit; }
 .app-shell { min-height: 100vh; display: flex; flex-direction: column; }
 .app-header {
   min-height: 64px;
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -60,22 +63,41 @@ a { color: inherit; }
   color: #f5f8f8;
   background-color: var(--navy-deep);
   background-image:
-    linear-gradient(rgba(3, 20, 34, .42) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(3, 20, 34, .42) 1px, transparent 1px),
-    radial-gradient(ellipse 72% 190% at 18% 155%, transparent 0 43%, rgba(12, 142, 170, .42) 44% 54%, rgba(44, 203, 234, .2) 55% 62%, transparent 63%),
-    radial-gradient(ellipse 68% 185% at 82% -70%, transparent 0 43%, rgba(36, 95, 124, .5) 44% 55%, rgba(12, 142, 170, .24) 56% 64%, transparent 65%),
-    linear-gradient(110deg, #0c2138 0 22%, #12364d 22% 42%, #15536a 42% 55%, #0f4258 55% 73%, #0c2138 73% 100%);
-  background-position: 0 0, 0 0, center center, center center, center center;
-  background-repeat: repeat, repeat, no-repeat, no-repeat, no-repeat;
-  background-size: 13px 13px, 13px 13px, 100% 260px, 100% 260px, 100% 100%;
+    radial-gradient(circle at 14% -30%, rgba(36, 95, 124, .34), transparent 38%),
+    linear-gradient(105deg, #091c30 0%, #0d2d43 52%, #081a2d 100%);
   border-bottom: 1px solid rgba(44, 203, 234, .34);
   box-shadow: 0 3px 14px rgba(12, 33, 56, .18);
 }
-.brand-lockup { min-width: max-content; display: flex; align-items: center; gap: 10px; flex: none; }
+.app-header::before {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 64px;
+  pointer-events: none;
+  opacity: .62;
+  background-image:
+    linear-gradient(rgba(3, 20, 34, .56) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(3, 20, 34, .56) 1px, transparent 1px),
+    linear-gradient(90deg, #0c8eaa 0%, #245f7c 43%, #2ccbea 70%, #0c8eaa 100%);
+  background-size: 10px 10px, 10px 10px, 100% 100%;
+  -webkit-mask-image:
+    radial-gradient(ellipse 62% 110% at 18% 138%, transparent 0 57%, #000 58% 67%, transparent 68%),
+    radial-gradient(ellipse 58% 105% at 80% 142%, transparent 0 60%, #000 61% 70%, transparent 71%);
+  mask-image:
+    radial-gradient(ellipse 62% 110% at 18% 138%, transparent 0 57%, #000 58% 67%, transparent 68%),
+    radial-gradient(ellipse 58% 105% at 80% 142%, transparent 0 60%, #000 61% 70%, transparent 71%);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+}
+.app-header::after { content: ""; position: absolute; z-index: 0; inset: 0; pointer-events: none; background: linear-gradient(90deg, rgba(5, 19, 33, .7) 0 12%, transparent 34% 68%, rgba(5, 18, 32, .68) 100%); }
+.brand-lockup { min-width: max-content; position: relative; z-index: 1; display: flex; align-items: center; gap: 10px; flex: none; }
 .brand-logo { width: 42px; height: 42px; display: block; object-fit: contain; filter: drop-shadow(0 2px 5px rgba(0, 13, 21, .22)); }
 .brand-copy h1 { margin: 0 0 3px; color: #fff; font-size: 18px; font-weight: 720; line-height: 1; letter-spacing: -.01em; }
 .brand-copy p { margin: 0; color: #b9dbe5; font-size: 12px; font-weight: 550; line-height: 1; letter-spacing: .06em; }
-.header-operations { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
+.header-operations { min-width: 0; position: relative; z-index: 1; display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
 .service-statuses { min-width: 0; position: relative; display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
 .service-summary {
   min-height: 28px;
