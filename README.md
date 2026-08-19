@@ -11,10 +11,6 @@ MosaicParse 解析 PDF、DOCX、PPTX、常见图片与独立视频。图片会�
 采样内容。文档内嵌图片作为可下载资产返回，文档内嵌视频则完全忽略。主产物是版本化
 `ContentParseResult`，Markdown / Plain Text 是方便 RAG 消费的派生视图。
 
-> MosaicParse is an independent community project and is not affiliated with
-> or endorsed by the Docling or GLM-OCR projects. Docling 与 GLM-OCR 名称及
-> 商标归各自权利人所有。
-
 ## 界面预览
 
 ![MosaicParse Web UI：原始 PDF 与 Markdown 表格解析结果并排预览](docs/assets/web-ui.png)
