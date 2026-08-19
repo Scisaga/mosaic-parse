@@ -9,13 +9,13 @@ export interface MosaicCell {
 }
 
 const PALETTE: readonly Rgb[] = [
-  [10, 31, 51],
-  [24, 67, 88],
-  [30, 100, 112],
-  [25, 133, 148],
-  [38, 117, 137],
-  [25, 63, 86],
-  [9, 29, 48],
+  [7, 26, 46],
+  [35, 73, 105],
+  [18, 112, 132],
+  [44, 174, 187],
+  [35, 105, 143],
+  [43, 66, 108],
+  [8, 28, 49],
 ]
 
 function hash(x: number, y: number, seed: number) {
@@ -86,12 +86,14 @@ export function generateMosaicCells(
         ? .5
         : ((horizontal - .5) * directionX + (vertical - .5) * directionY) / (projectionRadius * 2) + .5
       const broadNoise = valueNoise(horizontal * 3.2, vertical * 2.8, seed, 1)
-      const localNoise = valueNoise(horizontal * 7.5, vertical * 5.5, seed ^ 0x6d2b79f5, 1)
+      const localNoise = valueNoise(horizontal * 11, vertical * 7.5, seed ^ 0x6d2b79f5, 1)
       const lightNoise = valueNoise(horizontal * 4.4, vertical * 3.8, seed ^ 0x9e3779b9, 1) - .5
-      const colorPosition = clamp(directional * .46 + broadNoise * .42 + localNoise * .12)
+      const tileNoise = hash(column, row, seed ^ 0x85ebca6b) - .5
+      const colorField = directional * .2 + broadNoise * .45 + localNoise * .35
+      const colorPosition = clamp(.5 + (colorField - .5) * 1.75 + tileNoise * .14)
       const base = paletteColor(colorPosition)
-      const lightness = lightNoise * 20 + (localNoise - .5) * 5
-      const coolness = (broadNoise - .5) * 9
+      const lightness = lightNoise * 24 + (localNoise - .5) * 10 + tileNoise * 24
+      const coolness = (broadNoise - .5) * 12 + tileNoise * 8
       cells.push({
         color: cssColor(base, lightness, coolness),
         height: Math.max(1, tileSize - gap),

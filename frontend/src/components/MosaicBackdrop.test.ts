@@ -10,6 +10,11 @@ function distance(left: string, right: string) {
   return Math.sqrt(a.reduce((total, channel, index) => total + (channel - b[index]) ** 2, 0))
 }
 
+function brightness(color: string) {
+  const [red, green, blue] = channels(color)
+  return red * .2126 + green * .7152 + blue * .0722
+}
+
 describe('MosaicBackdrop color field', () => {
   it('is seeded, two-dimensional, and more coherent locally than across the full field', () => {
     const first = generateMosaicCells(480, 120, 12, 42)
@@ -30,8 +35,11 @@ describe('MosaicBackdrop color field', () => {
       distance(cell.color, first[(rows - 1) * columns + (columns - 1 - column)].color)
     ))
     const middleColumnColors = Array.from({ length: rows }, (_, row) => first[row * columns + 20].color)
+    const brightnessValues = first.map((cell) => brightness(cell.color))
     const average = (values: number[]) => values.reduce((sum, value) => sum + value, 0) / values.length
     expect(new Set(middleColumnColors).size).toBeGreaterThan(rows / 2)
+    expect(Math.max(...brightnessValues) - Math.min(...brightnessValues)).toBeGreaterThan(80)
+    expect(horizontalNeighbours.filter((value) => value > 6).length).toBeGreaterThan(first.length * .6)
     expect(average(horizontalNeighbours)).toBeLessThan(average(farDistances))
     expect(average(verticalNeighbours)).toBeLessThan(average(farDistances))
   })
