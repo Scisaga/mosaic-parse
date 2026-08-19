@@ -226,6 +226,58 @@ def _table_pdf(path: Path) -> None:
     document.close()
 
 
+def _visual_table_pdf(path: Path, image: Path) -> None:
+    document = _new_pdf()
+    page = document.new_page(width=595, height=680)
+    navy = (23 / 255, 59 / 255, 73 / 255)
+    pale = (240 / 255, 246 / 255, 244 / 255)
+    muted = (73 / 255, 92 / 255, 101 / 255)
+
+    page.insert_text((48, 58), "Field Observation Brief", fontsize=21, color=navy)
+    page.insert_text(
+        (48, 82),
+        "An original mixed-layout fixture with an embedded image and a ruled data table.",
+        fontsize=9.5,
+        color=muted,
+    )
+    page.insert_image(pymupdf.Rect(48, 108, 547, 356), filename=str(image))
+
+    page.insert_text((48, 392), "Quarterly measurements", fontsize=15, color=navy)
+    page.insert_text(
+        (48, 411),
+        "Measured values are synthetic and provided only for parser verification.",
+        fontsize=9,
+        color=muted,
+    )
+
+    x_values = (48, 155, 286, 417, 547)
+    y_values = (434, 470, 506, 542, 578, 614)
+    page.draw_rect(pymupdf.Rect(x_values[0], y_values[0], x_values[-1], y_values[1]), fill=pale, color=None)
+    for x in x_values:
+        page.draw_line((x, y_values[0]), (x, y_values[-1]), color=navy, width=0.7)
+    for y in y_values:
+        page.draw_line((x_values[0], y), (x_values[-1], y), color=navy, width=0.7)
+    rows = (
+        ("Period", "Observations", "Coverage", "Quality"),
+        ("Q1", "128", "91.4%", "Good"),
+        ("Q2", "146", "94.8%", "Good"),
+        ("Q3", "139", "93.1%", "Review"),
+        ("Q4", "157", "96.2%", "Good"),
+    )
+    for row_index, row in enumerate(rows):
+        baseline = 457 + row_index * 36
+        for column_index, value in enumerate(row):
+            page.insert_text(
+                (x_values[column_index] + 10, baseline),
+                value,
+                fontsize=9.5,
+                color=navy if row_index == 0 else muted,
+            )
+
+    document.save(path, garbage=4, deflate=True)
+    document.close()
+
+
 def generate(output: Path) -> None:
     output.mkdir(parents=True, exist_ok=True)
     scan = output / "sample-image.png"
@@ -238,6 +290,7 @@ def generate(output: Path) -> None:
     _mixed_pdf(output / "mixed-report.pdf", scan)
     _columns_pdf(output / "multi-column-research.pdf")
     _table_pdf(output / "table-report.pdf")
+    _visual_table_pdf(output / "field-observation-report.pdf", output / "natural-scene.png")
 
 
 def validate(output: Path) -> None:
@@ -247,6 +300,7 @@ def validate(output: Path) -> None:
         "mixed-report.pdf": 2,
         "multi-column-research.pdf": 1,
         "table-report.pdf": 1,
+        "field-observation-report.pdf": 1,
     }
     errors: list[str] = []
     image_path = output / "sample-image.png"

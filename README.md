@@ -4,18 +4,26 @@
 
 # MosaicParse
 
-供外部 RAG 系统调用的自托管多模态内容解析微服务。
+MosaicParse 是一个自托管的多模态内容解析服务，用在 PDF、Office 文档、图片或视频与
+RAG 等下游系统之间。
 
-MosaicParse 解析 PDF、DOCX、PPTX、常见图片与独立视频。图片会按实测布局/OCR
-信号路由至文档解析或 VLM 描述；视频通过 FFmpeg 采样关键帧，并明确限制摘要只基于
-采样内容。文档内嵌图片作为可下载资产返回，文档内嵌视频则完全忽略。主产物是版本化
-`ContentParseResult`，Markdown / Plain Text 是方便 RAG 消费的派生视图。
+它解决的问题很直接：不同文件格式需要不同的处理工具，而单纯转成纯文本或 Markdown，
+又会丢掉页码、阅读顺序、表格行列、图片位置和解析来源。MosaicParse 把这些输入整理成
+统一的 `ContentParseResult`，保留页/幻灯片、区域、文本块、表格单元格、媒体文件和视频
+关键帧，同时标出坐标、来源、质量和告警。下游只需对接一种结果格式；解析出问题时，
+也能回到具体页面、区域或单元格检查。
+
+服务会根据文本层、页面布局、OCR 和视觉信号自动选择处理方式。文档内嵌图片会作为
+可下载的媒体文件返回；独立视频通过 FFmpeg 采样关键帧，摘要只基于这些采样内容。
+Markdown / Plain Text 仍可按需生成，但它们只是便于阅读和接入的附加输出。
 
 ## 界面预览
 
-![MosaicParse Web UI：原始 PDF 与 Markdown 表格解析结果并排预览](docs/assets/web-ui.png)
+![MosaicParse Web UI：原始图文表格 PDF 与结构化解析概览并排预览](docs/assets/web-ui.png)
 
-截图使用仓库内自制的 `tests/fixtures/table-report.pdf`，不包含第三方文档内容。
+截图使用仓库内自制的 `tests/fixtures/field-observation-report.pdf`，
+同一页包含嵌入图片与网格表格，不包含第三方文档内容。右侧展示结构化主产物的
+解析概览，而非 Markdown 派生视图。
 
 ## 项目边界
 

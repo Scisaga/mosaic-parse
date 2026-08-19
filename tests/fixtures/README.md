@@ -11,6 +11,7 @@ report, article, logo, or other third-party copyrighted document is included.
 | `mixed-report.pdf` | Native first page plus scanned second page |
 | `multi-column-research.pdf` | Two text columns for reading-order checks |
 | `table-report.pdf` | Ruled numeric table for table-structure checks |
+| `field-observation-report.pdf` | Embedded raster image plus a ruled numeric table for mixed-layout checks |
 | `sample-image.png` | Standalone image upload and OCR fixture |
 | `natural-scene.{png,webp,bmp,tiff}` | Pure visual image routing in supported raster formats |
 | `mixed-screenshot.png` | Text plus chart image for mixed routing |
