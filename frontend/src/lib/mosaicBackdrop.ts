@@ -18,20 +18,16 @@ const PALETTE: readonly Rgb[] = [
   [8, 28, 49],
 ]
 
-const ACCENTS: readonly Rgb[] = [
-  [48, 153, 82],
-  [132, 72, 172],
-  [205, 157, 38],
-  [207, 83, 46],
+const ACCENT_PALETTE: readonly Rgb[] = [
+  [45, 139, 83],
+  [21, 132, 137],
+  [150, 70, 185],
+  [96, 68, 163],
+  [44, 82, 132],
+  [192, 156, 57],
+  [181, 154, 61],
+  [80, 146, 74],
 ]
-
-interface AccentBlob {
-  color: Rgb
-  radiusX: number
-  radiusY: number
-  x: number
-  y: number
-}
 
 function hash(x: number, y: number, seed: number) {
   let value = Math.imul(x ^ seed, 0x45d9f3b) ^ Math.imul(y + seed, 0x27d4eb2d)
@@ -57,12 +53,12 @@ function valueNoise(x: number, y: number, seed: number, scale: number) {
   return lerp(top, bottom, amountY)
 }
 
-function paletteColor(position: number): Rgb {
-  const scaled = Math.max(0, Math.min(1, position)) * (PALETTE.length - 1)
-  const index = Math.min(PALETTE.length - 2, Math.floor(scaled))
+function paletteColor(palette: readonly Rgb[], position: number): Rgb {
+  const scaled = Math.max(0, Math.min(1, position)) * (palette.length - 1)
+  const index = Math.min(palette.length - 2, Math.floor(scaled))
   const amount = scaled - index
-  return PALETTE[index].map((channel, channelIndex) => (
-    Math.round(lerp(channel, PALETTE[index + 1][channelIndex], amount))
+  return palette[index].map((channel, channelIndex) => (
+    Math.round(lerp(channel, palette[index + 1][channelIndex], amount))
   )) as unknown as Rgb
 }
 
@@ -84,35 +80,17 @@ function mixColor(base: Rgb, accent: Rgb, amount: number): Rgb {
   )) as unknown as Rgb
 }
 
-function createAccentBlobs(columns: number, rows: number, seed: number): AccentBlob[] {
-  const ordered = ACCENTS
-    .map((color, index) => ({ color, index, order: hash(index, 73, seed ^ 0xc2b2ae35) }))
-    .sort((left, right) => left.order - right.order)
-
-  return ordered.map(({ color, index }, slot) => ({
-    color,
-    radiusX: 2.8 + hash(index, 89, seed) * 3.8,
-    radiusY: 1.4 + hash(index, 97, seed) * 1.5,
-    x: ((slot + .15 + hash(index, 101, seed) * .7) / ordered.length) * Math.max(0, columns - 1),
-    y: hash(index, 107, seed) * Math.max(0, rows - 1),
-  }))
-}
-
-function accentAt(column: number, row: number, blobs: AccentBlob[]) {
-  let color: Rgb | null = null
-  let strength = 0
-  for (const blob of blobs) {
-    const distanceX = (column - blob.x) / blob.radiusX
-    const distanceY = (row - blob.y) / blob.radiusY
-    const distance = Math.sqrt(distanceX ** 2 + distanceY ** 2)
-    if (distance >= 1) continue
-    const candidateStrength = smooth(1 - distance) * .84
-    if (candidateStrength > strength) {
-      color = blob.color
-      strength = candidateStrength
-    }
+function accentAt(horizontal: number, vertical: number, seed: number) {
+  const broadHue = valueNoise(horizontal * 2.7, vertical * 2.35, seed ^ 0xc2b2ae35, 1)
+  const localHue = valueNoise(horizontal * 7.2, vertical * 5.4, seed ^ 0x27d4eb2d, 1)
+  const broadCoverage = valueNoise(horizontal * 3.4, vertical * 2.8, seed ^ 0x165667b1, 1)
+  const localCoverage = valueNoise(horizontal * 8.4, vertical * 5.8, seed ^ 0xd3a2646c, 1)
+  const position = clamp(.5 + (broadHue * .58 + localHue * .42 - .5) * 2.35)
+  const coverage = broadCoverage * .72 + localCoverage * .28
+  return {
+    color: paletteColor(ACCENT_PALETTE, position),
+    strength: .18 + smooth(clamp((coverage - .16) / .76)) * .62,
   }
-  return { color, strength }
 }
 
 export function generateMosaicCells(
@@ -129,7 +107,6 @@ export function generateMosaicCells(
   const directionX = Math.cos(angle)
   const directionY = Math.sin(angle)
   const projectionRadius = (Math.abs(directionX) + Math.abs(directionY)) / 2
-  const accentBlobs = createAccentBlobs(columns, rows, seed)
 
   for (let row = 0; row < rows; row += 1) {
     for (let column = 0; column < columns; column += 1) {
@@ -144,9 +121,9 @@ export function generateMosaicCells(
       const tileNoise = hash(column, row, seed ^ 0x85ebca6b) - .5
       const colorField = directional * .2 + broadNoise * .45 + localNoise * .35
       const colorPosition = clamp(.5 + (colorField - .5) * 1.75 + tileNoise * .14)
-      const accent = accentAt(column, row, accentBlobs)
-      const baseColor = paletteColor(colorPosition)
-      const base = accent.color ? mixColor(baseColor, accent.color, accent.strength) : baseColor
+      const accent = accentAt(horizontal, vertical, seed)
+      const baseColor = paletteColor(PALETTE, colorPosition)
+      const base = mixColor(baseColor, accent.color, accent.strength)
       const lightness = lightNoise * 24 + (localNoise - .5) * 10 + tileNoise * 24
       const coolness = (broadNoise - .5) * 12 + tileNoise * 8
       cells.push({
