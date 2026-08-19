@@ -18,6 +18,21 @@ const PALETTE: readonly Rgb[] = [
   [8, 28, 49],
 ]
 
+const ACCENTS: readonly Rgb[] = [
+  [48, 153, 82],
+  [132, 72, 172],
+  [205, 157, 38],
+  [207, 83, 46],
+]
+
+interface AccentBlob {
+  color: Rgb
+  radiusX: number
+  radiusY: number
+  x: number
+  y: number
+}
+
 function hash(x: number, y: number, seed: number) {
   let value = Math.imul(x ^ seed, 0x45d9f3b) ^ Math.imul(y + seed, 0x27d4eb2d)
   value = Math.imul(value ^ (value >>> 16), 0x45d9f3b)
@@ -63,6 +78,43 @@ function clamp(value: number) {
   return Math.max(0, Math.min(1, value))
 }
 
+function mixColor(base: Rgb, accent: Rgb, amount: number): Rgb {
+  return base.map((channel, index) => (
+    Math.round(lerp(channel, accent[index], amount))
+  )) as unknown as Rgb
+}
+
+function createAccentBlobs(columns: number, rows: number, seed: number): AccentBlob[] {
+  const ordered = ACCENTS
+    .map((color, index) => ({ color, index, order: hash(index, 73, seed ^ 0xc2b2ae35) }))
+    .sort((left, right) => left.order - right.order)
+
+  return ordered.map(({ color, index }, slot) => ({
+    color,
+    radiusX: 2.8 + hash(index, 89, seed) * 3.8,
+    radiusY: 1.4 + hash(index, 97, seed) * 1.5,
+    x: ((slot + .15 + hash(index, 101, seed) * .7) / ordered.length) * Math.max(0, columns - 1),
+    y: hash(index, 107, seed) * Math.max(0, rows - 1),
+  }))
+}
+
+function accentAt(column: number, row: number, blobs: AccentBlob[]) {
+  let color: Rgb | null = null
+  let strength = 0
+  for (const blob of blobs) {
+    const distanceX = (column - blob.x) / blob.radiusX
+    const distanceY = (row - blob.y) / blob.radiusY
+    const distance = Math.sqrt(distanceX ** 2 + distanceY ** 2)
+    if (distance >= 1) continue
+    const candidateStrength = smooth(1 - distance) * .84
+    if (candidateStrength > strength) {
+      color = blob.color
+      strength = candidateStrength
+    }
+  }
+  return { color, strength }
+}
+
 export function generateMosaicCells(
   width: number,
   height: number,
@@ -77,6 +129,7 @@ export function generateMosaicCells(
   const directionX = Math.cos(angle)
   const directionY = Math.sin(angle)
   const projectionRadius = (Math.abs(directionX) + Math.abs(directionY)) / 2
+  const accentBlobs = createAccentBlobs(columns, rows, seed)
 
   for (let row = 0; row < rows; row += 1) {
     for (let column = 0; column < columns; column += 1) {
@@ -91,7 +144,9 @@ export function generateMosaicCells(
       const tileNoise = hash(column, row, seed ^ 0x85ebca6b) - .5
       const colorField = directional * .2 + broadNoise * .45 + localNoise * .35
       const colorPosition = clamp(.5 + (colorField - .5) * 1.75 + tileNoise * .14)
-      const base = paletteColor(colorPosition)
+      const accent = accentAt(column, row, accentBlobs)
+      const baseColor = paletteColor(colorPosition)
+      const base = accent.color ? mixColor(baseColor, accent.color, accent.strength) : baseColor
       const lightness = lightNoise * 24 + (localNoise - .5) * 10 + tileNoise * 24
       const coolness = (broadNoise - .5) * 12 + tileNoise * 8
       cells.push({

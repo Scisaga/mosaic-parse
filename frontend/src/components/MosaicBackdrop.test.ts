@@ -15,6 +15,16 @@ function brightness(color: string) {
   return red * .2126 + green * .7152 + blue * .0722
 }
 
+function hasAccent(cells: ReturnType<typeof generateMosaicCells>, accent: 'green' | 'purple' | 'yellow' | 'orange') {
+  return cells.some(({ color }) => {
+    const [red, green, blue] = channels(color)
+    if (accent === 'green') return green > red * 1.28 && green > blue * 1.08
+    if (accent === 'purple') return red > green * 1.16 && blue > green * 1.2
+    if (accent === 'yellow') return red > blue * 1.8 && green > blue * 1.45 && red - green < 75
+    return red > green * 1.5 && green > blue * 1.08
+  })
+}
+
 describe('MosaicBackdrop color field', () => {
   it('is seeded, two-dimensional, and more coherent locally than across the full field', () => {
     const first = generateMosaicCells(480, 120, 12, 42)
@@ -42,5 +52,13 @@ describe('MosaicBackdrop color field', () => {
     expect(horizontalNeighbours.filter((value) => value > 6).length).toBeGreaterThan(first.length * .6)
     expect(average(horizontalNeighbours)).toBeLessThan(average(farDistances))
     expect(average(verticalNeighbours)).toBeLessThan(average(farDistances))
+  })
+
+  it('adds sparse green, purple, yellow, and orange accent clusters', () => {
+    const cells = generateMosaicCells(1440, 120, 12, 42)
+    expect(hasAccent(cells, 'green')).toBe(true)
+    expect(hasAccent(cells, 'purple')).toBe(true)
+    expect(hasAccent(cells, 'yellow')).toBe(true)
+    expect(hasAccent(cells, 'orange')).toBe(true)
   })
 })
