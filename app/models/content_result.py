@@ -205,6 +205,9 @@ class UnitDiagnostics(BaseModel):
     selected_strategy: Literal[
         "docling",
         "native_repair",
+        "scan_skipped",
+        "glm_table",
+        "glm_qwen_targeted",
         "qwen_visual_fusion",
         "office_native",
         "visual_description",
@@ -401,7 +404,7 @@ class ContentLinks(BaseModel):
 
 
 class ContentParseResult(BaseModel):
-    """Primary parse product consumed by external retrieval systems."""
+    """Request-scoped parser evidence used for validation and asset handling."""
 
     model_config = ConfigDict(extra="forbid")
 

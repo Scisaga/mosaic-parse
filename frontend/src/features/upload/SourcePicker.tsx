@@ -75,7 +75,7 @@ export function SourcePicker({ source, onChange, disabled = false, detectedPages
                 <strong title={source.file.name}>{source.file.name}</strong>
                 <span>{source.file.type || '未知类型'} · {formatBytes(source.file.size)}{detectedPages ? ` · ${detectedPages} 页` : ''}</span>
               </div>
-              <button type="button" className="icon-button" onClick={() => onChange({ ...source, file: null })} disabled={disabled} aria-label="移除文档" title="移除文档"><CloseIcon /></button>
+              <button type="button" className="icon-button selected-file-remove" onClick={() => onChange({ ...source, file: null })} disabled={disabled} aria-label="移除文档" title="移除文档"><CloseIcon /></button>
             </div>
           ) : (
             <div

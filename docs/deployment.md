@@ -44,6 +44,15 @@ initialization. `DOCLING_COMPILE_MODELS=0` avoids a very slow first document
 caused by `torch.compile`; enable it only after workload-specific benchmarking
 and a controlled warm-up.
 
+For native-text PDFs, `DOCLING_PAGE_WORKERS` may be raised above 1 to split one
+contiguous document range across persistent converter instances. Each instance
+uses `DOCLING_NUM_THREADS` CPU threads and is loaded during service startup, not
+per request. Page parallelism starts at `DOCLING_PAGE_PARALLEL_MIN_PAGES`; a
+native-text preflight keeps scanned/mixed PDFs on the single-converter path.
+The product of `PARSER_WORKERS` and `DOCLING_PAGE_WORKERS` is capped at 32 because
+each slot owns model state. A measured 12-core allocation can start with 3 page
+workers and 4 threads per worker; re-benchmark on the target NUMA topology.
+
 The service uses `DOCLING_LOCAL_ARTIFACTS_PATH=/models/docling` so its setting
 does not collide with Docling's own `DOCLING_ARTIFACTS_PATH` environment
 variable. Do not set the upstream variable to a fresh empty volume: upstream
@@ -137,11 +146,14 @@ docker compose --profile glm-sdk ps
 docker compose logs -f glm-ocr-sdk
 ```
 
-`profile=accurate` sends measured complex visual regions to the SDK and
-Qwen. Healthy native and sparse pages stay on Docling. The SDK sidecar is
-configured with `layout.device=cpu`, `batch_size=1`, and `max_workers=1`; it
-reuses `http://glm-ocr:8000` and must not receive a GPU device reservation.
-Set `VISUAL_ROUTER_ENABLED=0` for an immediate automatic-route rollback.
+`scan_policy=auto` first rotates measured complex pages into an upright image and sends them to
+the SDK. Clean financial tables pass the GLM quality gate with zero Qwen calls; localized column
+or subtotal conflicts use one row-crop Qwen call, while uncertain topology falls back to the
+bounded full-table route. Healthy native and sparse pages stay on Docling and retain their native
+text layer. The SDK sidecar uses `layout.device=cpu`, `batch_size=1`, and `max_workers=1`; it reuses
+`http://glm-ocr:8000` and must not receive a GPU reservation. Set
+`GLM_TABLE_GATE_ENABLED=0` to force the previous full-table behavior, or
+`VISUAL_ROUTER_ENABLED=0` for a complete visual-route rollback.
 
 ## Mode 4: Remote GLM and/or existing Ollama
 

@@ -3,19 +3,16 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated
 from urllib.parse import quote
 
 import orjson
 from fastapi import APIRouter, Depends, Form, Header, Query, Request, Response
-from fastapi import Path as ApiPath
 from fastapi.responses import FileResponse, StreamingResponse
 
 from app.api.dependencies import get_runtime, require_api_key
-from app.api.schemas import DeleteJobResponse, JobResponse
+from app.api.schemas import DeleteJobResponse, JobResponse, PublicContentAsset
 from app.models import (
-    ContentAsset,
-    ContentParseResult,
     JobEvent,
     JobRecord,
     JobStatus,
@@ -93,41 +90,26 @@ def _download_headers(filename: str, suffix: str) -> dict[str, str]:
 
 @router.get(
     "/{job_id}/result",
-    response_model=ContentParseResult,
-    summary="Read the completed content parse result",
+    response_class=Response,
+    summary="Read the completed GFM Markdown result",
+    responses={200: {"content": {"text/markdown": {}}}},
 )
 async def get_content_result(
     job_id: str,
     request: Request,
     download: Annotated[bool, Query()] = False,
-) -> ContentParseResult | Response:
-    service = get_runtime(request).job_service
-    record = await service.get_job(job_id)
-    result = await service.get_parse_result(job_id)
-    if not download:
-        return result
-    return Response(
-        content=result.model_dump_json(indent=2),
-        media_type="application/json",
-        headers=_download_headers(record.filename, ".json"),
-    )
-
-
-@router.get("/{job_id}/rendering/{format}", summary="Read a derived content rendering")
-async def get_content_rendering(
-    job_id: str,
-    request: Request,
-    format: Annotated[Literal["markdown", "text"], ApiPath()],
-    download: Annotated[bool, Query()] = False,
 ) -> Response:
     service = get_runtime(request).job_service
     record = await service.get_job(job_id)
-    content = await service.get_result(job_id, format)
-    markdown = format == "markdown"
-    media_type = "text/markdown" if markdown else "text/plain"
-    suffix = ".md" if markdown else ".txt"
-    headers = _download_headers(record.filename, suffix) if download else {}
-    return Response(content=content, media_type=media_type, headers=headers)
+    result = await service.get_result(job_id)
+    headers = {"X-Content-ID": job_id}
+    if download:
+        headers.update(_download_headers(record.filename, ".md"))
+    return Response(
+        content=result,
+        media_type="text/markdown; charset=utf-8",
+        headers=headers,
+    )
 
 
 @router.post("/{job_id}/retry", response_model=JobResponse, summary="Retry a failed job")
@@ -155,9 +137,14 @@ async def delete_content_job(job_id: str, request: Request) -> DeleteJobResponse
     return DeleteJobResponse(id=job_id, status="deleted")
 
 
-@router.get("/{job_id}/assets", response_model=list[ContentAsset], summary="List content assets")
-async def get_content_assets(job_id: str, request: Request) -> list[ContentAsset]:
-    return (await get_runtime(request).job_service.get_parse_result(job_id)).assets
+@router.get(
+    "/{job_id}/assets",
+    response_model=list[PublicContentAsset],
+    summary="List content assets",
+)
+async def get_content_assets(job_id: str, request: Request) -> list[PublicContentAsset]:
+    assets = await get_runtime(request).job_service.get_assets(job_id)
+    return [PublicContentAsset.from_asset(asset) for asset in assets]
 
 
 def _parse_range(value: str, size: int) -> tuple[int, int]:
@@ -189,8 +176,8 @@ def _parse_range(value: str, size: int) -> tuple[int, int]:
 @router.get("/{job_id}/assets/{asset_id}", summary="Download a content asset")
 async def get_content_asset(job_id: str, asset_id: str, request: Request) -> Response:
     service = get_runtime(request).job_service
-    parse_result = await service.get_parse_result(job_id)
-    asset = next((item for item in parse_result.assets if item.asset_id == asset_id), None)
+    assets = await service.get_assets(job_id)
+    asset = next((item for item in assets if item.asset_id == asset_id), None)
     if asset is None:
         raise ServiceError("asset_not_found", "asset does not exist", status_code=404)
     try:
@@ -237,7 +224,7 @@ async def get_content_bundle(job_id: str, request: Request) -> FileResponse:
     record = await service.get_job(job_id)
     if record.status not in {JobStatus.COMPLETED, JobStatus.PARTIAL}:
         raise ServiceError("result_not_ready", "job result is not available", status_code=409)
-    await service.get_parse_result(job_id)
+    await service.get_assets(job_id)
     path = await service.storage.build_bundle(job_id)
     return FileResponse(
         path,

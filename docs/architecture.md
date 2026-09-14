@@ -1,103 +1,72 @@
 # Architecture
 
-MosaicParse 是多模态内容解析层，不是业务信息抽取层。FastAPI 服务保持 CPU-only；
-GLM-OCR 和 Qwen 是可选远程模型后端。
+MosaicParse 是 PDF/Office/图片/视频到 GFM Markdown 的解析层。详细坐标证据是
+请求内的解析中间表示，不是交给业务 LLM 的输出；EventRail 等下游直接消费可读正文、
+列表和表格，再完成实体、关系、事件与财务指标抽取。
 
 ```text
 Browser / HTTP / MCP
           |
           v
-Source validation + jobs + timeout
+格式校验 + Job + 页范围 + 超时
           |
-          v
-Real-format router (magic / OOXML / FFprobe)
+          +-- 数字 PDF ------> 原生文本 + Docling Layout/TableFormer
           |
-          +--> PDF/image document -----> Docling + deterministic repair
+          +-- 扫描/混合 PDF -> PP-DocLayoutV3 + 定向 GLM-OCR
+          |                         |
+          |                         v
+          |                   财务表质量门控
+          |                    |      |       |
+          |                    |      |       +-- 全表 Qwen（拓扑失败）
+          |                    |      +---------- 局部 Qwen（冲突行）
+          |                    +----------------- GLM 直接采用
           |
-          +--> visual/mixed image ------> measured routing + VLM description
-          |
-          +--> DOCX/PPTX --------------> Docling + image-only OOXML relations
-          |
-          +--> standalone video --------> bounded FFmpeg keyframes + VLM
+          +-- Office ---------> 原生结构 + 嵌入图片关系
+          +-- 图片/视频 ------> 资产保留 + 按需视觉描述/关键帧
                                       |
                                       v
-                        unit/region/table/asset result
+                      内部 Evidence IR + TableGridIR
                                       |
                                       v
-                     ContentParseResult v1 (primary)
-                           |                    |
-                           v                    v
-                  Markdown renderer      plain-text renderer
-                           |
-                           v
-                  EventRail / other domain systems
-                  entity + relation + event extraction
+                  跨页表合并 + GFM Markdown 导出
+                    + 独立鉴权资产清单/下载
 ```
 
-## 边界
+## PDF 路由
 
-本项目负责：
+文字型 PDF 不默认走 GLM-OCR。原生文本坐标可靠时，Docling Layout/TableFormer 直接
+恢复阅读顺序和表格；OCR 只用于扫描页、混合页或实测质量不足的区域。
 
-- 内容格式、页面/幻灯片/图片分类、旋转、区域和阅读顺序；
-- 原生文字、OCR 与视觉读取的来源记录；
-- 表格拓扑、单元格、span、bbox 与跨页逻辑表；
-- 签章、印章、手写、图片资产与正文的分离；
-- 独立视频的实测元数据、场景候选、关键帧与采样限定摘要；
-- 结构质量、未解决冲突和运行测量；
-- 从解析结果派生 Markdown / Plain Text。
+默认 `scan_policy=auto` 下，扫描表格先按检测方向旋转页面像素，再执行
+PP-DocLayoutV3 与 GLM-OCR。
+GLM 表格经过确定性门控：
 
-本项目不负责：
+1. 归一化左右并表、空行和可确定的附注括号；
+2. 验证表头/列宽/期间列、附注进入金额列等结构不变量；
+3. 使用小计、资产负债恒等式和签章遮挡位置发现可局部定位的数字冲突；
+4. 无冲突时零次调用 Qwen；少量冲突只裁剪相关行并至多调用一次 Qwen；只有拓扑不明、
+   多级表头失败或全局恒等式无法定位时才执行全表视觉解析。
 
-- 公司、人物、产品或指标的规范化与消歧；
-- `ReportedFact`、实体、关系、事件或产业图谱；
-- 事件时间、参与者和数值角色的领域解释；
-- Embedding、切块、索引、问答、领域总结和长期资产管理。
+`scan_policy=skip` 在 PDF 进入 Docling 时关闭扫描 OCR，检测到的扫描/混合页不产生
+表格内容，只保留可信原生文字、明确的 Markdown 跳过提示和整页图像资产。
+`VLM_ENABLED=0` 是部署级硬停用；此时可用 GLM 结果仍会保留，并标注局部未复核状态。
 
-EventRail 应保存 `content_id/unit_id/region_id/table_id/cell_id/asset_id` 作为来源引用，
-并独立演进领域 ontology。解析器升级不会直接改写 ER 的事件定义。
+## 内部证据与公共输出
 
-## 唯一公共路由
+内部 `ContentParseResult`/Evidence IR 保存页、区域、候选来源、bbox、表格单元格和质量，
+仅用于同一次解析中的融合、质量判断、跨页关系和资产裁剪。它不进入 OpenAPI，不作为
+结果文件持久化，也不发给下游 LLM。
 
-请求不再选择 `standard/ocr/vlm` 后端。`profile` 是唯一质量控制：
+公共 GFM Markdown 包含：
 
-- `fast/balanced`：自动 Docling/GLM 路径，不出站调用 Qwen；
-- `accurate`：只把测得的复杂扫描/混合表、横置表和签章页送入视觉融合。
+- 标准 Markdown 正文、标题和列表；
+- 解析器识别出的 GFM 表格，包括多级/分段表头；
+- 合并后的跨页逻辑表，续页重复表头仅在结构证据充分时去重；
+- 图片/视频资产的普通 Markdown 列表、描述和下载链接。
 
-运行时只保留 `VISUAL_ROUTER_ENABLED=0` 和 `VLM_ENABLED=0` 等部署级停用开关。
-不存在整页 Qwen Markdown 替换，也不存在旧 fallback/diagram 分支。
-
-## 视觉融合
-
-GLM SDK 提供布局区域、HTML 表格和 OCR 原值；Docling 提供原生文本、表格与坐标；
-Qwen 负责区域语义、方向、表格拓扑、行列归属、可见值读取和冲突裁决。表格按
-区域和单元格装配，不能覆盖同页正文、图片或跨页来源。
-
-单页最多 3 次 Qwen 请求、总预算 180 秒。区域读取最多 16K 输出 token，模型别名
-使用 32K context。结构化响应经 JSON Schema 和 Pydantic 双重校验。reasoning 仅
-用于模型内部推理与长度测量，不进入公共结果、API 或日志。
-
-## ContentParseResult
-
-稳定契约位于 `app/models/content_result.py`，版本为 `content-parse-result/1.0`。核心关系：
-
-```text
-content
-source
-  units[]
-    regions[]  -> block_ids[] / table_ids[]
-    blocks[]   -> bbox + reading_order + provenance
-  tables[]
-    cells[]    -> row/column/span/bbox/text/provenance
-  logical_tables[] -> fragment_table_ids[] + source_units[]
-  assets[]          -> SHA256 + locations[] + visual_analysis
-  video_analysis    -> scenes[] + keyframes[]
-  renderings        -> derived Markdown / plain text
-  diagnostics       -> measured quality counts
-  runtime           -> backend and latency measurements
-```
-
-未知坐标或测量保持 `null`，不能伪造为零。原始媒体通过鉴权资产接口返回；prompt、
-reasoning 和未采用候选正文不进入公共结果或日志。
+解析层不判断某张表应变成财务事实、公司字段或股东关系，也不依据固定首行生成字段名。
+公司实体消歧、关系/事件 ontology、财务指标归一化、事件去重和修订由 EventRail 或其他
+下游负责。需要审计时使用任务 ID 回到原 PDF 和资产，而不是把全页坐标送入抽取提示词。
 
 ## 持久化
 
@@ -106,24 +75,23 @@ reasoning 和未采用候选正文不进入公共结果或日志。
 ├── jobs.db
 └── jobs/<job_id>
     ├── input/original.<ext>
-    ├── output/result.json
-    ├── output/rendered.md
-    ├── output/rendered.txt
-    ├── output/assets.zip
+    ├── output/result.md
+    ├── output/asset-index.json   # 仅资产下载元数据，不含坐标、正文或表格 IR
+    ├── output/assets.zip         # 按需生成
     ├── assets/original/*
     ├── assets/derived/keyframes/*
-    └── logs/warnings.json
+    ├── assets/derived/previews/*
+    └── logs/warnings.json        # 无正文诊断
 ```
 
-`result.json` 是主结果；两个 rendering 文件是便利视图。SQLite 是 Job 状态真值，
-SSE 只是增量体验层。
+`result.md` 是唯一文档结果。SQLite 是 Job 状态真值，SSE 只是增量体验层。资产索引、
+告警和 ZIP manifest 是运维/下载控制数据，不是替代的解析 JSON。
 
-## 生命周期与安全
+## 安全与边界
 
-启动时打开 SQLite、标记中断 Job、创建有界队列并初始化解析 worker。Docling 的
-同步 CPU 转换在线程外执行；外部模型调用有独立超时、重试和并发限制。
+上传与 URL 均不可信：校验 magic、OOXML 关系、ZIP 展开边界、FFprobe、大小、单元数、
+协议、解析 IP 与每次重定向。模型 URL、模型名和 prompt 只能由服务端配置。
+图像、候选正文、prompt 和 reasoning 不进入日志或公共结果。
 
-上传字节与 URL 均不可信：校验 magic、OOXML 内容类型/关系、ZIP 展开边界、
-FFprobe 元数据、大小、单元数、文件名、协议、解析 IP 和每次重定向。OOXML 只遍历
-image relationship；video/media relationship 完全不进入处理或诊断。文档、FFmpeg
-和 VLM 分别有并发边界。模型 URL、模型名和 prompt 只能由服务端配置。
+本项目不负责 Embedding、索引、问答、公司/人物消歧、领域关系与事件编排；它负责把
+下游真正需要的可见内容和结构恢复为可高效消费的一份 Markdown 文档。

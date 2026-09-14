@@ -9,13 +9,17 @@ import pytest
 from app.models import (
     ContentParseOptions,
     DocumentParseResult,
+    PageDiagnostics,
     PageParseResult,
+    PageSourceKind,
     ParsePipeline,
     RouteSummary,
+    ScanPolicy,
     ServiceError,
     StoredSource,
 )
 from app.parsers import ParserUnavailableError
+from app.services.evidence_service import PageEvidence
 from app.services.parser_service import (
     ParserService,
     _NativePageEvidence,
@@ -140,7 +144,7 @@ async def test_backend_unavailable_preserves_probe_details(monkeypatch) -> None:
         )
     assert caught.value.code == "backend_unavailable"
     assert caught.value.details == {
-        "profile": "balanced",
+        "scan_policy": "auto",
         "backend": "fake",
         "state": "unavailable",
     }
@@ -201,23 +205,27 @@ async def test_parse_always_materializes_content_parse_result(monkeypatch) -> No
     assert parsed.parse_result.renderings.markdown.endswith("Evidence text")
 
 
-async def test_include_renderings_false_does_not_remove_parse_result(monkeypatch) -> None:
+async def test_parse_preserves_multi_section_gfm_table_without_domain_rewrite(
+    monkeypatch,
+) -> None:
+    markdown = """## 截至报告期末的财务指标
+
+| 项目 | 本报告期末 | 上年末 | 本报告期末比上年末增减 |
+| --- | ---: | ---: | ---: |
+| 流动比率 | 1.75 | 1.95 | -10.26% |
+|  | 本报告期 | 上年同期 | 本报告期比上年同期增减 |
+| 扣除非经常性损益后净利润 | 69,780.34 | 59,811.73 | 16.67% |"""
     service = ParserService(SimpleNamespace(parser_workers=1, content_timeout_seconds=1.0))
-    install_parser(service, ImmediateParser("Evidence text"), monkeypatch)
+    install_parser(service, ImmediateParser(markdown), monkeypatch)
 
-    parsed = await service.parse(
-        stored_source(),
-        ContentParseOptions(include_renderings=False),
-        document_id="docparse_ir_no_rendering",
-    )
+    parsed = await service.parse(stored_source(), ContentParseOptions(), document_id="docparse_gfm")
 
-    assert parsed.parse_result is not None
-    assert parsed.parse_result.units[0].blocks[0].text == "Evidence text"
-    assert parsed.parse_result.renderings.markdown == ""
-    assert parsed.parse_result.units[0].renderings.markdown == ""
+    assert markdown in parsed.markdown
+    assert "|  | 本报告期 | 上年同期 |" in parsed.markdown
+    assert "<fact" not in parsed.markdown
 
 
-async def test_balanced_skips_visual_and_accurate_invokes_visual_once(monkeypatch) -> None:
+async def test_scan_policy_controls_selective_visual_fusion(monkeypatch) -> None:
     service = ParserService(SimpleNamespace(parser_workers=1, content_timeout_seconds=1.0))
     install_parser(service, ImmediateParser("content"), monkeypatch)
     calls = 0
@@ -229,15 +237,43 @@ async def test_balanced_skips_visual_and_accurate_invokes_visual_once(monkeypatc
     monkeypatch.setattr(service, "_apply_visual_fusion", visual)
     await service.parse(
         stored_source(),
-        ContentParseOptions(profile="balanced"),
-        document_id="docparse_balanced",
+        ContentParseOptions(scan_policy=ScanPolicy.SKIP),
+        document_id="docparse_skip",
     )
     await service.parse(
         stored_source(),
-        ContentParseOptions(profile="accurate"),
-        document_id="docparse_accurate",
+        ContentParseOptions(scan_policy=ScanPolicy.AUTO),
+        document_id="docparse_auto",
     )
     assert calls == 1
+
+
+def test_skip_scan_policy_removes_unbound_ocr_and_retains_full_page_asset() -> None:
+    service = ParserService(SimpleNamespace(parser_workers=1, content_timeout_seconds=1.0))
+    parsed = result("docparse_skip_scan", "货币资金\n999,999.00\n999,999.00")
+    parsed.pages[0].diagnostics = PageDiagnostics(source_kind=PageSourceKind.SCANNED)
+    parsed._table_fragments = [SimpleNamespace(page_number=1)]
+    parsed._picture_candidates = [SimpleNamespace(page_number=1)]
+    evidence = PageEvidence(
+        page_number=1,
+        source_kind=PageSourceKind.SCANNED,
+        page_width=595,
+        page_height=842,
+    )
+
+    skipped = service._skip_scanned_pdf_pages(parsed, {1: evidence})
+
+    assert skipped == {1}
+    assert "扫描页未处理（scan_policy=skip）" in (parsed.pages[0].content or "")
+    assert "999,999.00" not in (parsed.pages[0].content or "")
+    assert parsed._table_fragments == []
+    assert len(parsed._picture_candidates) == 1
+    assert parsed._picture_candidates[0].normalized_bbox == (0.0, 0.0, 1.0, 1.0)
+    assert parsed._picture_candidates[0].allow_description is False
+    assert [warning.code for warning in parsed.pages[0].warnings] == [
+        "scan_processing_skipped"
+    ]
+    assert parsed.pages[0].diagnostics.selected_strategy.value == "scan_skipped"
 
 
 def test_text_normalization_uses_native_tokens_and_preserves_code_and_mermaid() -> None:

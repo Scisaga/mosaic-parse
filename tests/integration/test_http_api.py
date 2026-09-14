@@ -64,17 +64,13 @@ def test_sync_parse_health_backends_and_ready(tmp_path: Path, native_pdf: Path) 
             files=upload(native_pdf),
         )
         assert response.status_code == 200, response.text
-        parsed = response.json()
-        assert parsed["object"] == "content.parse_result"
-        assert parsed["schema_version"] == "content-parse-result/1.0"
-        assert parsed["status"] == "completed"
-        assert parsed["renderings"]["markdown"] == "# Page 1\n\nValue: 12,345.67"
-        assert parsed["units"][0]["blocks"][0]["text"].startswith("# Page 1")
-        assert parsed["runtime"]["primary_backend"] == "docling-standard"
+        assert response.headers["content-type"].startswith("text/markdown")
+        assert response.headers["x-content-id"].startswith("job_")
+        assert response.text == "# Page 1\n\nValue: 12,345.67"
         assert response.headers["x-request-id"].startswith("req_")
 
 
-def test_profile_is_the_only_public_visual_routing_control(
+def test_scan_policy_is_the_only_public_visual_routing_control(
     tmp_path: Path, native_pdf: Path
 ) -> None:
     app = create_app(make_test_settings(tmp_path), runtime_factory=fake_runtime)
@@ -82,14 +78,14 @@ def test_profile_is_the_only_public_visual_routing_control(
         response = client.post(
             "/v1/content/jobs",
             files=upload(native_pdf),
-            data={"profile": "accurate"},
+            data={"scan_policy": "auto"},
         )
         assert response.status_code == 202, response.text
         assert response.json()["options"] == {
-            "profile": "accurate",
+            "scan_policy": "auto",
             "unit_range": None,
             "language": ["zh", "en"],
-            "include_renderings": True,
+            "describe_images": False,
             "description_language": "zh-CN",
             "timeout_seconds": None,
         }
@@ -97,14 +93,26 @@ def test_profile_is_the_only_public_visual_routing_control(
         removed = client.post(
             "/v1/content/jobs",
             files=upload(native_pdf),
-            data={"vlm_policy": "auto_visual", "mode": "auto"},
+            data={"vlm_policy": "auto_visual", "mode": "auto", "profile": "accurate"},
         )
         assert removed.status_code == 422
         assert removed.json()["error"]["code"] == "removed_options"
-        assert removed.json()["error"]["details"]["fields"] == ["mode", "vlm_policy"]
+        assert removed.json()["error"]["details"]["fields"] == [
+            "mode",
+            "profile",
+            "vlm_policy",
+        ]
+
+        invalid_policy = client.post(
+            "/v1/content/jobs",
+            files=upload(native_pdf),
+            data={"scan_policy": "ocr_only"},
+        )
+        assert invalid_policy.status_code == 422
+        assert invalid_policy.json()["error"]["code"] == "validation_error"
 
 
-def test_include_renderings_false_keeps_result_and_hides_only_derived_views(
+def test_removed_rendering_switch_is_rejected(
     tmp_path: Path,
     native_pdf: Path,
 ) -> None:
@@ -115,12 +123,9 @@ def test_include_renderings_false_keeps_result_and_hides_only_derived_views(
             files=upload(native_pdf),
             data={"include_renderings": "false"},
         )
-        assert response.status_code == 200, response.text
-        payload = response.json()
-        assert payload["units"][0]["blocks"]
-        assert payload["units"][0]["diagnostics"]["quality_verdict"] == "trusted"
-        assert payload["renderings"] == {"markdown": "", "plain_text": ""}
-        assert payload["units"][0]["renderings"] == {"markdown": "", "plain_text": ""}
+        assert response.status_code == 422, response.text
+        assert response.json()["error"]["code"] == "removed_options"
+        assert response.json()["error"]["details"]["fields"] == ["include_renderings"]
 
 
 def test_async_job_sse_results_and_delete(tmp_path: Path, native_pdf: Path) -> None:
@@ -140,14 +145,16 @@ def test_async_job_sse_results_and_delete(tmp_path: Path, native_pdf: Path) -> N
         assert "pages" not in completed
         assert "pipeline" not in completed
 
-        parse_result = client.get(job["result_url"])
-        assert parse_result.status_code == 200
-        assert parse_result.json()["object"] == "content.parse_result"
-        assert "12,345.67" in parse_result.json()["renderings"]["markdown"]
+        markdown = client.get(job["result_url"])
+        assert markdown.status_code == 200
+        assert markdown.headers["content-type"].startswith("text/markdown")
+        assert markdown.headers["x-content-id"] == job["id"]
+        assert "12,345.67" in markdown.text
 
-        downloaded = client.get(f"/v1/content/jobs/{job['id']}/rendering/text?download=true")
+        downloaded = client.get(f"{job['result_url']}?download=true")
         assert downloaded.headers["content-disposition"].startswith("attachment;")
-        assert downloaded.headers["content-type"].startswith("text/plain")
+        assert downloaded.headers["content-type"].startswith("text/markdown")
+        assert client.get(f"/v1/content/jobs/{job['id']}/rendering/text").status_code == 404
 
         events = client.get(job["events_url"])
         assert events.status_code == 200
@@ -284,15 +291,21 @@ def test_legacy_document_routes_are_not_registered(tmp_path: Path) -> None:
         assert client.get("/v1/documents/jobs/legacy").status_code == 404
 
 
-def test_openapi_exposes_only_the_parse_result_contract(tmp_path: Path) -> None:
+def test_openapi_exposes_markdown_without_coordinate_result_schema(tmp_path: Path) -> None:
     app = create_app(make_test_settings(tmp_path), runtime_factory=fake_runtime)
     with TestClient(app) as client:
         document = client.get("/openapi.json").json()
 
     schemas = document["components"]["schemas"]
-    expected = {
+    assert "PublicContentAsset" in schemas
+    assert "locations" not in schemas["PublicContentAsset"]["properties"]
+    assert "NormalizedBBox" not in schemas
+    assert "PublicContentParseOptions" in schemas
+    public_options = schemas["PublicContentParseOptions"]["properties"]
+    assert public_options["scan_policy"]["enum"] == ["auto", "skip"]
+    assert "profile" not in public_options
+    assert {
         "ContentParseResult",
-        "ContentAsset",
         "ContentUnit",
         "ContentRegion",
         "TextBlock",
@@ -301,16 +314,17 @@ def test_openapi_exposes_only_the_parse_result_contract(tmp_path: Path) -> None:
         "ElementProvenance",
         "ProvenanceSource",
         "ParseWarning",
-        "VisualAnalysis",
         "VideoAnalysis",
-    }
-    assert expected <= schemas.keys()
+    }.isdisjoint(schemas)
     assert not any(name.endswith("IR") for name in schemas)
-    assert "provenance" in schemas["TextBlock"]["properties"]
-    assert "evidence" not in schemas["TextBlock"]["properties"]
     serialized = json.dumps(document, ensure_ascii=False)
     assert "ContentEvidenceIR" not in serialized
     assert "get_content_evidence" not in serialized
+    result_response = document["paths"]["/v1/content/jobs/{job_id}/result"]["get"][
+        "responses"
+    ]["200"]
+    assert "text/markdown" in result_response["content"]
+    assert "/v1/content/jobs/{job_id}/rendering/{format}" not in document["paths"]
 
 
 def test_authenticated_asset_range_bundle_checksum_and_cleanup(
@@ -324,7 +338,7 @@ def test_authenticated_asset_range_bundle_checksum_and_cleanup(
             "/v1/content/parse", headers=headers, files=upload(native_pdf)
         )
         assert parsed.status_code == 200, parsed.text
-        job_id = parsed.json()["source"]["content_id"]
+        job_id = parsed.headers["x-content-id"]
 
         media = Path("tests/fixtures/scene-switch.mp4").read_bytes()
         digest = hashlib.sha256(media).hexdigest()
@@ -333,9 +347,9 @@ def test_authenticated_asset_range_bundle_checksum_and_cleanup(
         asset_path = asset_dir / f"{asset_id}__scene-switch.mp4"
         asset_path.write_bytes(media)
 
-        result_path = tmp_path / "jobs" / job_id / "output" / "result.json"
-        parse_result = json.loads(result_path.read_text())
-        parse_result["assets"].append(
+        index_path = tmp_path / "jobs" / job_id / "output" / "asset-index.json"
+        asset_index = json.loads(index_path.read_text())
+        asset_index["assets"].append(
             {
                 "asset_id": asset_id,
                 "kind": "video",
@@ -348,19 +362,21 @@ def test_authenticated_asset_range_bundle_checksum_and_cleanup(
                 "height": 360,
                 "duration_ms": 6000,
                 "parent_asset_id": None,
-                "locations": [{"unit_id": parse_result["units"][0]["unit_id"]}],
                 "visual_analysis": None,
                 "status": "ready",
                 "warning_codes": [],
                 "download_url": f"/v1/content/jobs/{job_id}/assets/{asset_id}",
             }
         )
-        result_path.write_text(json.dumps(parse_result), encoding="utf-8")
+        index_path.write_text(json.dumps(asset_index), encoding="utf-8")
+        assert (tmp_path / "jobs" / job_id / "output" / "result.md").is_file()
+        assert not (tmp_path / "jobs" / job_id / "output" / "result.json").exists()
 
         assert client.get(f"/v1/content/jobs/{job_id}/assets").status_code == 401
         listed = client.get(f"/v1/content/jobs/{job_id}/assets", headers=headers)
         assert listed.status_code == 200
         assert listed.json()[0]["sha256"] == digest
+        assert "locations" not in listed.json()[0]
 
         ranged = client.get(
             f"/v1/content/jobs/{job_id}/assets/{asset_id}",
@@ -378,14 +394,23 @@ def test_authenticated_asset_range_bundle_checksum_and_cleanup(
         assert invalid_range.status_code == 416
         assert invalid_range.json()["error"]["code"] == "range_not_satisfiable"
 
+        cached_bundle = tmp_path / "jobs" / job_id / "output" / "assets.zip"
+        with zipfile.ZipFile(cached_bundle, "w") as archive:
+            archive.writestr(
+                "manifest.json",
+                json.dumps({"object": "retired-document-assets", "assets": []}),
+            )
+
         bundle = client.get(f"/v1/content/jobs/{job_id}/bundle", headers=headers)
         assert bundle.status_code == 200
         with zipfile.ZipFile(io.BytesIO(bundle.content)) as archive:
             manifest = json.loads(archive.read("manifest.json"))
             archived = archive.read(f"assets/{asset_id}/scene-switch.mp4")
-        assert manifest["object"] == "content.parse_result"
-        assert manifest["schema_version"] == "content-parse-result/1.0"
+        assert manifest["schema"] == "mosaic-asset-bundle/1.0"
+        assert "object" not in manifest
+        assert "schema_version" not in manifest
         assert manifest["assets"][0]["sha256"] == digest
+        assert "locations" not in manifest["assets"][0]
         assert hashlib.sha256(archived).hexdigest() == digest
 
         deleted = client.delete(f"/v1/content/jobs/{job_id}", headers=headers)

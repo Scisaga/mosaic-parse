@@ -18,8 +18,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("inputs", nargs="+", type=Path, help="PDF or image files")
     parser.add_argument("--base-url", default="http://127.0.0.1:12303")
     parser.add_argument("--api-key")
-    parser.add_argument("--mode", choices=("auto", "standard", "ocr", "vlm"), default="auto")
-    parser.add_argument("--profile", choices=("fast", "balanced", "accurate"), default="balanced")
+    parser.add_argument("--scan-policy", choices=("auto", "skip"), default="auto")
     parser.add_argument("--timeout", type=float, default=900.0)
     parser.add_argument("--json-output", type=Path)
     return parser.parse_args()
@@ -32,10 +31,7 @@ def run_one(client: httpx.Client, path: Path, args: argparse.Namespace) -> dict[
             "/v1/content/parse",
             files={"file": (path.name, source, "application/octet-stream")},
             data={
-                "mode": args.mode,
-                "profile": args.profile,
-                "output_format": "markdown",
-                "include_diagnostics": "true",
+                "scan_policy": args.scan_policy,
             },
         )
     elapsed = time.perf_counter() - started
@@ -45,11 +41,11 @@ def run_one(client: httpx.Client, path: Path, args: argparse.Namespace) -> dict[
         "http_status": response.status_code,
         "duration_seconds": round(elapsed, 4),
     }
-    try:
-        payload = response.json()
-    except ValueError:
-        payload = {"body": response.text[:500]}
-    record["response"] = payload
+    record["response"] = {
+        "content_type": response.headers.get("content-type"),
+        "content_id": response.headers.get("x-content-id"),
+        "characters": len(response.text),
+    }
     return record
 
 
@@ -67,8 +63,7 @@ def main() -> int:
 
     durations = [float(record["duration_seconds"]) for record in records]
     report = {
-        "mode": args.mode,
-        "profile": args.profile,
+        "scan_policy": args.scan_policy,
         "requests": records,
         "summary": {
             "count": len(records),

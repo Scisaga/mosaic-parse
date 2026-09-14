@@ -90,6 +90,9 @@ class Settings(BaseSettings):
     docling_model_download: bool = True
     docling_compile_models: bool = False
     docling_do_cell_matching: bool = True
+    docling_num_threads: int = Field(default=4, ge=1, le=64)
+    docling_page_workers: int = Field(default=1, ge=1, le=8)
+    docling_page_parallel_min_pages: int = Field(default=4, ge=2, le=1_000)
 
     quality_sparse_native_characters: int = Field(default=40, ge=0)
     quality_sparse_max_image_coverage: float = Field(default=0.05, ge=0, le=1)
@@ -131,6 +134,9 @@ class Settings(BaseSettings):
     glm_sdk_max_image_pixels: int = Field(default=8_000_000, gt=0)
     glm_sdk_max_concurrency: int = Field(default=1, ge=1, le=16)
     glm_sdk_max_retries: int = Field(default=1, ge=0, le=5)
+    glm_table_gate_enabled: bool = True
+    glm_table_targeted_max_rows: int = Field(default=8, ge=1, le=12)
+    glm_table_targeted_max_cells: int = Field(default=12, ge=1, le=24)
     visual_router_enabled: bool = True
 
     vlm_enabled: bool = False
@@ -195,6 +201,10 @@ class Settings(BaseSettings):
             raise ValueError("SYNC_MAX_BYTES cannot exceed MAX_UPLOAD_BYTES")
         if self.sync_max_units > self.max_content_units:
             raise ValueError("SYNC_MAX_UNITS cannot exceed MAX_CONTENT_UNITS")
+        if self.parser_workers * self.docling_page_workers > 32:
+            raise ValueError(
+                "PARSER_WORKERS * DOCLING_PAGE_WORKERS cannot exceed 32 cached converters"
+            )
         return self
 
     @property
@@ -245,10 +255,14 @@ class Settings(BaseSettings):
             "ffmpeg_max_concurrency": self.ffmpeg_max_concurrency,
             "ffmpeg_threads": self.ffmpeg_threads,
             "docling_device": self.docling_device,
+            "docling_num_threads": self.docling_num_threads,
+            "docling_page_workers": self.docling_page_workers,
+            "docling_page_parallel_min_pages": self.docling_page_parallel_min_pages,
             "source_urls_enabled": self.allow_source_urls,
             "private_source_urls_allowed": self.allow_private_source_urls,
             "glm_ocr_enabled": self.glm_ocr_enabled,
             "glm_sdk_enabled": self.glm_sdk_enabled,
+            "glm_table_gate_enabled": self.glm_table_gate_enabled,
             "visual_router_enabled": self.visual_router_enabled,
             "vlm_enabled": self.vlm_enabled,
         }

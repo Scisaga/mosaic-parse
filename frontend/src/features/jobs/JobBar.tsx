@@ -36,19 +36,20 @@ export function JobBar({ job, sseState = 'idle', actionBusy = false, onCancel, o
   const active = job.status === 'queued' || job.status === 'running'
   const retryable = job.status === 'failed' || job.status === 'partial' || job.status === 'cancelled'
   const progressLabel = progressPhaseLabel(job.progress.phase)
+  const transportLabel = sseState === 'fallback' ? '轮询更新' : sseState === 'live' ? null : '连接中'
   return (
     <footer className="job-bar" aria-live="polite">
       <div className="job-progress-block">
         <div className="job-progress-meta">
           <strong><span className={`job-status-dot job-${job.status}`} />{STATUS_LABEL[job.status]}</strong>
           <span>{job.progress.current}/{job.progress.total ?? '—'} {progressLabel}</span>
-          {active && <span className={`transport-state transport-${sseState}`}>{sseState === 'live' ? '实时更新' : sseState === 'fallback' ? '轮询更新' : '连接中'}</span>}
+          {active && transportLabel && <span className={`transport-state transport-${sseState}`}>{transportLabel}</span>}
         </div>
         <div className="progress-track" role="progressbar" aria-valuenow={Math.round(percent)} aria-valuemin={0} aria-valuemax={100}><span style={{ width: `${percent}%` }} /></div>
       </div>
       <div className="job-facts">
         <span><small>已处理</small>{job.progress.current}/{job.progress.total ?? '—'}</span>
-        <span><small>档位</small><b>{job.options?.profile ?? '—'}</b></span>
+        <span><small>扫描页</small><b>{job.options ? (job.options.scan_policy === 'skip' ? '跳过' : '自动') : '—'}</b></span>
         <span><small>耗时</small>{formatDuration(job.started_at && job.completed_at ? Date.parse(job.completed_at) - Date.parse(job.started_at) : null)}</span>
         <span><small>尝试</small>{job.attempt ?? 1}</span>
       </div>

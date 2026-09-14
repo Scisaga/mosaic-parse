@@ -41,7 +41,7 @@ describe('WorkspaceState', () => {
     expect(container.querySelector('img')).toHaveAttribute('src', '/illustrations/workspace-pages.png')
   })
 
-  it('keeps live loading and error semantics on the wrapper only', () => {
+  it('keeps live loading and error attributes on the wrapper only', () => {
     const { rerender } = render(<WorkspaceState variant="loading" description="正在加载" role="status" live="polite" busy />)
     const status = screen.getByRole('status')
     expect(status).toHaveAttribute('aria-live', 'polite')

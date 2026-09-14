@@ -13,7 +13,7 @@ def data_store(tmp_path: Path) -> Path:
     jobs = root / "jobs"
     job = jobs / "job_fixture"
     (job / "output").mkdir(parents=True)
-    (job / "output" / "result.json").write_bytes(b"result")
+    (job / "output" / "result.md").write_bytes(b"result")
     (root / "models").mkdir()
     (root / "models" / "cache.bin").write_bytes(b"model-cache")
     (root / "jobs.sqlite3").write_bytes(b"legacy")

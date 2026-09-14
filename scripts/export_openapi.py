@@ -17,7 +17,6 @@ REQUIRED_PATHS = {
     "/v1/content/jobs/{job_id}",
     "/v1/content/jobs/{job_id}/events",
     "/v1/content/jobs/{job_id}/result",
-    "/v1/content/jobs/{job_id}/rendering/{format}",
     "/v1/content/jobs/{job_id}/assets",
     "/v1/content/jobs/{job_id}/assets/{asset_id}",
     "/v1/content/jobs/{job_id}/bundle",
@@ -46,14 +45,18 @@ def validate(schema: dict[str, Any]) -> None:
     if schema.get("info", {}).get("title") != "MosaicParse":
         raise SystemExit("OpenAPI title is not MosaicParse")
     schemas = schema.get("components", {}).get("schemas", {})
-    if "ContentParseResult" not in schemas:
-        raise SystemExit("OpenAPI does not expose ContentParseResult")
+    if "PublicContentParseOptions" not in schemas:
+        raise SystemExit("OpenAPI does not expose PublicContentParseOptions")
     retired = {name for name in schemas if name.endswith("IR")}
     if retired:
         raise SystemExit(f"OpenAPI exposes retired public IR models: {sorted(retired)}")
-    block_properties = schemas.get("TextBlock", {}).get("properties", {})
-    if "provenance" not in block_properties or "evidence" in block_properties:
-        raise SystemExit("TextBlock does not expose the provenance contract")
+    options = schemas["PublicContentParseOptions"].get("properties", {})
+    if set(options.get("scan_policy", {}).get("enum", [])) != {"auto", "skip"}:
+        raise SystemExit("scan_policy does not expose exactly auto and skip")
+    if "profile" in options:
+        raise SystemExit("OpenAPI still exposes the removed quality profile")
+    if "/v1/content/jobs/{job_id}/rendering/{format}" in paths:
+        raise SystemExit("OpenAPI still exposes the removed rendering endpoint")
 
 
 def main() -> int:

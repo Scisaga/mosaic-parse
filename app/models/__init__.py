@@ -40,6 +40,7 @@ from app.models.job import JobError, JobEvent, JobProgress, JobRecord, JobStatus
 from app.models.parse_options import (
     ContentParseOptions,
     ParseProfile,
+    ScanPolicy,
     VlmPolicy,
 )
 from app.models.parse_result import (
@@ -94,6 +95,7 @@ __all__ = [
     "PageStatus",
     "ParsePipeline",
     "ParseProfile",
+    "ScanPolicy",
     "ParseUsage",
     "ParseWarning",
     "ParseRuntime",

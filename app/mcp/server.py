@@ -12,11 +12,11 @@ from mcp.server import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 
-from app.api.schemas import JobResponse
+from app.api.schemas import JobResponse, PublicContentAsset
 from app.models import (
     ContentParseOptions,
     JobRecord,
-    ParseProfile,
+    ScanPolicy,
     ServiceError,
 )
 
@@ -42,9 +42,10 @@ def create_mcp(runtime: Callable[[], Runtime], settings: Settings) -> McpBundle:
         "MosaicParse",
         version=settings.version,
         instructions=(
-            "Parse PDF, DOCX, PPTX, images, and standalone videos into ContentParseResult. "
-            "Markdown and text are RAG-friendly projections; assets remain authenticated HTTP resources. "
-            "Embedding, chunking, indexing, question answering, and domain extraction are downstream."
+            "Parse PDF, DOCX, PPTX, images, and standalone videos into GFM Markdown. "
+            "Headings, lists, paragraphs, and tables preserve the parser's visible structure; "
+            "assets remain authenticated HTTP resources. Entity, relation, event, and financial "
+            "fact extraction remain downstream."
         ),
     )
 
@@ -53,11 +54,11 @@ def create_mcp(runtime: Callable[[], Runtime], settings: Settings) -> McpBundle:
         source_url: str | None = None,
         file_base64: str | None = None,
         filename: str | None = None,
-        profile: str = "balanced",
+        scan_policy: str = "auto",
         unit_range: str | None = None,
         language: str = "zh,en",
+        describe_images: bool = False,
         description_language: str = "zh-CN",
-        include_renderings: bool = True,
         timeout_seconds: int | None = None,
         prefer_async: bool = False,
     ) -> dict[str, object]:
@@ -70,13 +71,21 @@ def create_mcp(runtime: Callable[[], Runtime], settings: Settings) -> McpBundle:
                     "Exactly one of source_url or file_base64 is required",
                 )
             )
+        if scan_policy not in {"auto", "skip"}:
+            return _service_error(
+                ServiceError(
+                    "invalid_options",
+                    "scan_policy must be auto or skip",
+                    status_code=422,
+                )
+            )
         try:
             options = ContentParseOptions(
-                profile=ParseProfile(profile),
+                scan_policy=ScanPolicy(scan_policy),
                 unit_range=unit_range,
                 language=[item.strip() for item in language.split(",") if item.strip()],
+                describe_images=describe_images,
                 description_language=description_language,  # type: ignore[arg-type]
-                include_renderings=include_renderings,
                 timeout_seconds=timeout_seconds,
             )
         except (ValueError, TypeError) as exc:
@@ -112,22 +121,18 @@ def create_mcp(runtime: Callable[[], Runtime], settings: Settings) -> McpBundle:
                     "delivery": "job",
                     **JobResponse.from_record(result).model_dump(mode="json", exclude_none=True),
                 }
-            response = result.parse_result
-            if response is None:
-                return _service_error(
-                    ServiceError("result_missing", "content parse result was not produced")
-                )
-            serialized = response.model_dump_json()
-            if len(serialized) <= settings.mcp_max_result_chars:
+            if len(result.markdown) <= settings.mcp_max_result_chars:
                 return {
                     "delivery": "inline",
-                    **response.model_dump(mode="json", exclude_none=True),
+                    "content_id": result.document_id,
+                    "media_type": "text/markdown",
+                    "content": result.markdown,
                 }
 
-            job = await job_service.get_job(response.source.content_id)
+            job = await job_service.get_job(result.document_id)
             return {
                 "delivery": "job",
-                "message": "The result exceeds the MCP inline limit; use the result URL.",
+                "message": "Markdown exceeds the MCP inline limit; use the result URL.",
                 **JobResponse.from_record(job).model_dump(mode="json", exclude_none=True),
             }
         except ServiceError as exc:
@@ -145,47 +150,22 @@ def create_mcp(runtime: Callable[[], Runtime], settings: Settings) -> McpBundle:
 
     @server.tool()
     async def get_content_result(job_id: str) -> dict[str, object]:
-        """Get a completed content parse result when small enough for MCP."""
+        """Get completed Markdown when small enough for MCP."""
 
         try:
-            parse_result = await runtime().job_service.get_parse_result(job_id)
-            if len(parse_result.model_dump_json()) > settings.mcp_max_result_chars:
-                return {
-                    "job_id": job_id,
-                    "delivery": "http",
-                    "result_url": f"/v1/content/jobs/{job_id}/result",
-                    "message": "The parse result exceeds the MCP inline limit.",
-                }
-            return {
-                "delivery": "inline",
-                **parse_result.model_dump(mode="json", exclude_none=True),
-            }
-        except ServiceError as exc:
-            return _service_error(exc)
-
-    @server.tool()
-    async def get_content_rendering(job_id: str, rendering: str = "markdown") -> dict[str, object]:
-        """Get one derived Markdown or plain-text rendering."""
-
-        if rendering not in {"markdown", "text"}:
-            return _service_error(
-                ServiceError(
-                    "invalid_rendering", "rendering must be markdown or text", status_code=422
-                )
-            )
-        try:
-            content = await runtime().job_service.get_result(job_id, rendering)
+            content = await runtime().job_service.get_result(job_id)
             if len(content) > settings.mcp_max_result_chars:
                 return {
                     "job_id": job_id,
                     "delivery": "http",
-                    "result_url": f"/v1/content/jobs/{job_id}/rendering/{rendering}",
-                    "message": "The rendering exceeds the MCP inline limit.",
+                    "media_type": "text/markdown",
+                    "result_url": f"/v1/content/jobs/{job_id}/result",
+                    "message": "Markdown exceeds the MCP inline limit.",
                 }
             return {
-                "job_id": job_id,
                 "delivery": "inline",
-                "rendering": rendering,
+                "job_id": job_id,
+                "media_type": "text/markdown",
                 "content": content,
             }
         except ServiceError as exc:
@@ -196,12 +176,12 @@ def create_mcp(runtime: Callable[[], Runtime], settings: Settings) -> McpBundle:
         """List asset metadata and authenticated HTTP download URLs without base64 data."""
 
         try:
-            parse_result = await runtime().job_service.get_parse_result(job_id)
+            assets = await runtime().job_service.get_assets(job_id)
             return {
                 "job_id": job_id,
                 "assets": [
-                    asset.model_dump(mode="json", exclude_none=True)
-                    for asset in parse_result.assets
+                    PublicContentAsset.from_asset(asset).model_dump(mode="json", exclude_none=True)
+                    for asset in assets
                 ],
                 "bundle_url": f"/v1/content/jobs/{job_id}/bundle",
             }
@@ -234,22 +214,23 @@ def create_mcp(runtime: Callable[[], Runtime], settings: Settings) -> McpBundle:
 
         return (
             "# MosaicParse usage\n\n"
-            "- Use `profile=balanced` for ordinary documents and low latency.\n"
-            "- Use `profile=accurate` when complex layouts need visual fusion.\n"
+            "- Scanned PDF pages are processed adaptively by default (`scan_policy=auto`).\n"
+            "- Use `scan_policy=skip` only to retain scanned pages as assets without OCR or table extraction.\n"
             "- Inputs are HTTP(S) URLs or base64 data; local filesystem paths are rejected.\n"
-            "- The primary output is ContentParseResult; Markdown and text are projections.\n"
+            "- The only document result is GFM Markdown (`text/markdown`).\n"
+            "- Tables remain Markdown tables; entity, relation, event, and financial extraction is downstream.\n"
             "- Large media assets are authenticated HTTP downloads, never inline base64.\n"
-            "- Entity, fact, relation, and event extraction are out of scope."
+            "- Domain entity, relation, and event extraction remains downstream."
         )
 
     @server.prompt()
     def content_parse_workflow(content_kind: str = "ordinary PDF") -> str:
-        """Select a parsing profile for content."""
+        """Parse content with automatic scanned-page routing."""
 
         return (
-            f"Parse the {content_kind} with MosaicParse. Use profile=balanced for ordinary "
-            "documents or profile=accurate for complex visual material. Return ContentParseResult "
-            "without asking this parser to embed, index, or extract domain facts."
+            f"Parse the {content_kind} with MosaicParse using scan_policy=auto. Return GFM "
+            "Markdown while preserving headings, lists, paragraphs, units, and logical tables. "
+            "Use scan_policy=skip only when scanned PDF pages must remain unprocessed assets."
         )
 
     transport_security = TransportSecuritySettings(

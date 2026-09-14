@@ -44,6 +44,9 @@ class TableFragment:
     source_kind: str = "docling"
     cells: list[TableCellFragment] = field(default_factory=list)
     cell_evidence: list[list[dict[str, str | None]]] = field(default_factory=list)
+    visual_obstructions: list[tuple[float, float, float, float]] = field(default_factory=list)
+    physical_num_rows: int | None = None
+    source_row_indices: list[int] = field(default_factory=list)
 
     @property
     def header_signature(self) -> str:

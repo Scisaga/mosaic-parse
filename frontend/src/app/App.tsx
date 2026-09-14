@@ -182,9 +182,6 @@ export function App() {
               bundle={resultQuery.data}
               loading={resultQuery.isLoading || (Boolean(job) && (job?.status === 'completed' || job?.status === 'partial') && !resultQuery.data && !resultError)}
               error={resultError}
-              selectedPage={selectedPage}
-              onSelectPage={setSelectedPage}
-              onRetryPage={job ? (page) => void retry(page) : undefined}
               onClear={() => void clear()}
             />
           )}

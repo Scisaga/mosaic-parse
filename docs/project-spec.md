@@ -1,141 +1,78 @@
 # MosaicParse 产品与工程规格
 
-> 当前契约：`content-parse-result/1.0`
+> 当前结果契约：GFM Markdown（`text/markdown`）
 >
 > 服务端口：`12303`
 >
-> 主结果：`ContentParseResult`
+> 唯一文档结果：`result.md`
 
 ## 1. 产品目标
 
-MosaicParse 把 PDF、DOCX、PPTX、图片和独立视频转换为可追溯的结构化解析结果。它回答：
+MosaicParse 把 PDF、DOCX、PPTX、图片和独立视频转换为一份适合 LLM/RAG/ER 消费的
+GFM Markdown。它完成版面恢复、表格识别、跨页表合并和媒体引用，但不把表格按领域规则
+改写成另一套事实语法，也不向下游返回解析坐标对象。
 
-- 页、幻灯片、图片或采样视频帧上有哪些结构与视觉元素；
-- 它们位于哪里、阅读顺序、出现位置或时间戳如何；
-- 值来自原生 PDF、Docling、GLM 还是 Qwen；
-- 哪些结构完整、哪些仍有冲突或缺失。
+## 2. 输出语义
 
-Markdown / Plain Text 是从解析结构生成的便利视图，不是产品的语义终点。
+- 正文、标题、列表保持 Markdown；
+- 表格统一保持 GFM，不执行财务、股东、键值或说明行的领域分类与改写；
+- 可确定的跨页连续表在导出前合并，续页重复表头按结构证据去重；
+- 多级表头和同表内的分段表头保持为表格行，不把首行表头硬套给后续所有行；
+- 嵌入图片、图表、签章区域和视频关键帧保留为资产，并用普通 Markdown 列表引用；
+- 详细 bbox、候选来源和融合证据仅存在于请求内部。
 
-## 2. 与 EventRail 的边界
+## 3. 与 EventRail 的边界
 
-MosaicParse 不定义领域事件。EventRail 负责：
+MosaicParse 只恢复可见标签、期间、单位和值在文档中的结构关系；EventRail 继续负责指标
+别名归一、公司实体消歧、关系/事件 ontology、事件去重、修订和训练数据生命周期。
+下游无需把 Evidence IR 放入 LLM 上下文。
 
-- 实体识别、规范化、别名合并和消歧；
-- 关系和事件 ontology；
-- 将公司、期间、指标、数值、单位等证据组装为事件；
-- 事件去重、修订、冲突和产业图谱。
+## 4. 请求与路由
 
-EventRail 的事件应引用本项目的稳定证据 ID：
-
-```text
-content_id / unit_id / region_id / block_id / table_id / cell_id / asset_id
-```
-
-`ReportedFact` 可在 EventRail 中作为事件体系的事实陈述类型或事件观测，不进入
-文档解析器。
-
-## 3. 请求契约
-
-同步和 Job 创建只接受：
+公共请求参数：
 
 ```text
 file | source_url
-profile=fast|balanced|accurate
+scan_policy=auto|skip             # 默认 auto；skip 只保留扫描页图像
 unit_range
 language
+describe_images=false           # 嵌入图片始终保留；描述按需生成
 description_language=zh-CN|en|auto
-include_renderings
 timeout_seconds
 prefer_async                  # 仅 /parse
 ```
 
-旧后端模式、输出格式、VLM policy、逐页/诊断开关全部删除且不兼容。
+`profile`、`include_renderings` 与旧后端选择参数已删除。路由原则：
 
-路由规则：
+- 数字 PDF：原生文本 + Docling Layout/TableFormer，不做无条件全页 OCR；
+- 扫描/混合 PDF：PP-DocLayoutV3 + 按页面方向旋转后的 GLM-OCR；
+- 干净财务表：GLM 直接采用，Qwen 调用为 0；
+- 少量可定位的错列/数字冲突：相关行裁剪后一次 Qwen 校验；
+- 多级表头、并表或全局拓扑失败：全表 Qwen 兜底；
+- Office/PDF：始终保留嵌入图片资产，仅在 `describe_images=true` 时生成描述；
+- 独立图片/视频：内容本体使用有界视觉分析。
+- `scan_policy=skip`：PDF 扫描/混合页不输出 OCR 数值或表格事实，保留整页资产和显式状态。
 
-- `fast/balanced`：文档使用 Docling/GLM 自动解析路径；
-- `accurate`：文档中的复杂视觉结构可执行区域视觉融合；
-- 纯视觉图片和独立视频始终需要服务端配置的 VLM；
-- 文档内嵌图片失败使父结果为 `partial`，内嵌视频完全忽略；
-- `VISUAL_ROUTER_ENABLED=0` 或 `VLM_ENABLED=0` 是部署级总开关。
-
-## 4. 主结果
-
-`ContentParseResult` 顶层字段：
-
-```text
-object = content.parse_result
-schema_version = content-parse-result/1.0
-status
-source
-units[]
-assets[]
-tables[]
-logical_tables[]
-visual_analysis
-video_analysis
-renderings
-diagnostics
-warnings[]
-runtime
-links
-created_at
-```
-
-单元类型为 page、slide、document_body、image 或 video。页面/幻灯片包含区域、
-文本块、物理表片段、bbox、阅读顺序、旋转、质量诊断和派生视图。资产保存 SHA256、
-角色、父资产、出现位置、处理状态和鉴权 URL。视频分析只陈述采样关键帧可见内容，
-不含音频证据。未知值使用 `null`；不得用零代表未知测量。
-
-公共解析结果不保存候选正文、图像、prompt、reasoning 或业务推断。
-
-## 5. 视觉融合
-
-GLM SDK 提供布局、区域、HTML 表格与 OCR；Docling 提供原生文本、坐标和原生表格；
-Qwen 提供方向、区域语义、拓扑、行列归属、可见值读取与冲突裁决。
-
-约束：
-
-- 不执行整页 Markdown 替换；
-- 按区域和单元格装配；
-- 左右并表生成独立 ParsedTable；
-- 签章、印章、手写内容不混入打印正文；
-- 单页最多 3 次 Qwen、180 秒；
-- 32K context，规划 4K、区域 16K、冲突 8K 输出预算；
-- JSON Schema 强制结构化响应，并经 Pydantic 再校验。
-
-## 6. 质量语义
-
-- `trusted`：结构完整，无截断、超时和未解决冲突；
-- `degraded`：内容可用，但存在预算耗尽、单源字段或少量未复核冲突；
-- `untrusted`：关键区域缺失、表格结构不完整或视觉重复未解决；
-- `failed`：没有任何可用页面内容。
-
-单元格的 `selected` 只表示由一个来源选中，不自动等价于页面 degraded。页面结论
-由结构完整性和未解决问题决定。
-
-## 7. 持久化和接口
+## 5. 持久化和接口
 
 ```text
-output/result.json     # 主结果
-output/rendered.md     # 派生
-output/rendered.txt    # 派生
-output/assets.zip      # 按需原子生成并缓存
-assets/original/*      # 原始图片、Office 图片和独立视频
+output/result.md         # 唯一文档结果
+output/asset-index.json  # 无坐标资产控制元数据，无正文和表格 Evidence IR
+output/assets.zip        # 按需生成
+assets/original/*
 assets/derived/keyframes/*
-logs/warnings.json     # 无正文诊断
+assets/derived/previews/*
+logs/warnings.json       # 无正文诊断
 ```
 
 HTTP：
 
 ```text
-POST /v1/content/parse
+POST /v1/content/parse                  # 200 text/markdown 或 202 Job JSON
 POST /v1/content/jobs
 GET  /v1/content/jobs/{id}
 GET  /v1/content/jobs/{id}/events
-GET  /v1/content/jobs/{id}/result
-GET  /v1/content/jobs/{id}/rendering/{markdown|text}
+GET  /v1/content/jobs/{id}/result       # text/markdown
 GET  /v1/content/jobs/{id}/assets
 GET  /v1/content/jobs/{id}/assets/{asset_id}
 GET  /v1/content/jobs/{id}/bundle
@@ -144,19 +81,29 @@ DELETE /v1/content/jobs/{id}
 ```
 
 MCP：`parse_content`、`get_content_job`、`get_content_result`、
-`get_content_rendering`、`get_content_assets`；资源 scheme 为 `mosaicparse://`。
+`get_content_assets`。不存在 JSON 文档结果或独立 rendering 工具。
+
+## 6. Markdown 导出原则
+
+导出器只做格式级处理：页序拼接、可确定的跨页表合并、续页重复表头去重和 GFM
+规范化。它不做指标别名、期间推断、数值归一化、表格业务分型或事实生成。识别不确定时
+保留原始单元格文本和相邻上下文，让下游模型基于整段文档判断。
+
+## 7. 质量和训练闭环
+
+短期以规则门控和小范围视觉复核为主，不先微调大模型。标注数据应保存：输入页/裁剪、
+模型候选、人工最终结构、原始单元格引用、错误类型和模型版本；训练/评测集合按文档
+拆分，防止同一财报页面泄漏到训练与测试两侧。
+
+只有在积累足够的真实纠错样本后，才分别训练版面/表格结构或字段归一化模型。LLM 可以
+生成预标注，但必须经人工确认后进入 Gold；线上纠错进入候选池，不直接回灌训练集。
 
 ## 8. 验收
 
-- Python：ruff、mypy、pytest、OpenAPI、fixture check；
-- 前端：lint、typecheck、test、build；
-- Compose：配置展开和健康检查；
-- FFmpeg/FFprobe、Office、图片、视频和资产下载在真实镜像中闭环；
-- 含内嵌视频 PPTX 不产生视频资产、视频告警或 FFmpeg 调用；
-- 关键帧单调、位于实测时长内、不超过 24，并覆盖首尾；
-- 资产下载字节与 SHA256 一致，视频 Range、bundle 与过期清理可验证；
-- `balanced` 原生页不产生 Qwen 调用；
-- `accurate` 复杂视觉页不超过 3 次/180 秒；
-- 解析结果保留同页非表正文、图片/签章内容、cell span 和跨页 table provenance；
-- 数字、符号、单位和日期不得相对真值退化；
-- 私有 PDF、manifest 和运行结果不进入 Git。
+- 后端 ruff、mypy、pytest、OpenAPI 通过；前端测试、类型检查和构建通过；
+- `/parse` 与 `/result` 只返回 `text/markdown`，文档持久化只有 `output/result.md`；
+- UI 只有扫描页开关、内容预览、Markdown 源文、媒体和 API 示例，不提供质量档位或 JSON/TXT 下载；
+- 数字 PDF 不无条件 OCR；干净 GLM 财务表 Qwen 调用为 0；
+- 局部冲突不升级为整页/整表 Qwen，完整兜底仍受每页调用和时间预算约束；
+- 多级/分段表头、跨页并表、续页表头、期间、负数、单位、附注与资产引用有回归测试；
+- 私有 PDF、Gold 标注和运行结果不进入 Git。

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from app.models.backend import BackendStatus
 from app.models.error import ServiceError
-from app.models.parse_options import ContentParseOptions, VlmPolicy
+from app.models.parse_options import ContentParseOptions, ScanPolicy, VlmPolicy
 from app.models.parse_result import (
     DocumentParseResult,
     PageDiagnostics,
@@ -22,6 +22,7 @@ from app.models.parse_result import (
     PageSourceKind,
     PageStatus,
     PipelineWarning,
+    QualityVerdict,
     SelectionStrategy,
     WarningSeverity,
 )
@@ -61,7 +62,8 @@ from app.services.ir_service import DocumentIRService
 from app.services.multimodal_service import MultimodalService
 from app.services.quality_service import QualityService
 from app.services.storage_service import StorageService
-from app.services.visual_fusion_service import VisualFusionService
+from app.services.table_service import TableFragment
+from app.services.visual_fusion_service import GlmTableAssessment, VisualFusionService
 from app.utils.ids import new_content_id
 from app.utils.page_range import PageRangeError, format_page_range, parse_page_range
 from app.utils.settings import setting
@@ -83,6 +85,17 @@ class _NativePageEvidence:
     cjk_space_boundaries: set[str] = field(default_factory=set)
     underscore_identifiers: list[_NativeIdentifierEvidence] = field(default_factory=list)
     numbered_headings: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class _SkippedPageImage:
+    """Request-scoped full-page asset retained when scan processing is disabled."""
+
+    page_number: int
+    placeholder_index: int = 0
+    caption: str = "扫描页原图"
+    normalized_bbox: tuple[float, float, float, float] = (0.0, 0.0, 1.0, 1.0)
+    allow_description: bool = False
 
 
 class ParserService:
@@ -1224,6 +1237,84 @@ class ParserService:
                 targets[page.page_number] = "signature"
         return targets
 
+    @staticmethod
+    def _skip_scanned_pdf_pages(
+        result: DocumentParseResult,
+        evidence_by_page: dict[int, PageEvidence],
+    ) -> set[int]:
+        """Retain skipped scanned pages as images and emit no unbound OCR values."""
+
+        skipped = {
+            page.page_number
+            for page in result.pages
+            if (evidence := evidence_by_page.get(page.page_number)) is not None
+            and evidence.source_kind in {PageSourceKind.SCANNED, PageSourceKind.MIXED}
+        }
+        if not skipped:
+            return set()
+
+        result._table_fragments = [
+            fragment
+            for fragment in result._table_fragments
+            if getattr(fragment, "page_number", None) not in skipped
+        ]
+        result._picture_candidates = [
+            picture
+            for picture in result._picture_candidates
+            if getattr(picture, "page_number", None) not in skipped
+        ]
+        result._picture_candidates.extend(
+            _SkippedPageImage(page_number=page_number) for page_number in sorted(skipped)
+        )
+        result._vlm_page_numbers.difference_update(skipped)
+        for page_number in skipped:
+            result._visual_page_irs.pop(page_number, None)
+        result.route_summary.vlm_pages = 0
+
+        result.warnings = [
+            warning
+            for warning in result.warnings
+            if warning.page_number not in skipped
+            or warning.severity == WarningSeverity.INFO
+        ]
+        for page in result.pages:
+            if page.page_number not in skipped:
+                continue
+            evidence = evidence_by_page[page.page_number]
+            source_kind = evidence.source_kind.value
+            marker = (
+                f"> 扫描页未处理（scan_policy=skip）：第 {page.page_number} 页，"
+                f"页面类型为 {source_kind}。"
+            )
+            native_text = "\n\n".join(
+                block.text.strip()
+                for block in evidence._blocks_in_reading_order()
+                if block.text.strip()
+            )
+            page.content = f"{marker}\n\n## 原生文本\n\n{native_text}" if native_text else marker
+            page.plain_text = None
+            page.status = PageStatus.WARNING
+            page.warnings = [
+                warning
+                for warning in page.warnings
+                if warning.severity == WarningSeverity.INFO
+            ]
+            page.warnings.append(
+                PipelineWarning(
+                    code="scan_processing_skipped",
+                    message="scanned page processing was disabled; the page image was retained as an asset",
+                    severity=WarningSeverity.WARNING,
+                    page_number=page.page_number,
+                    backend="scan-policy",
+                    details={"source_kind": source_kind},
+                )
+            )
+            if page.diagnostics is not None:
+                page.diagnostics.selected_strategy = SelectionStrategy.SCAN_SKIPPED
+                page.diagnostics.quality_verdict = QualityVerdict.UNTRUSTED
+                page.diagnostics.visual_fusion = None
+        return skipped
+
     async def _apply_visual_fusion(
         self,
         result: DocumentParseResult,
@@ -1246,28 +1337,6 @@ class ParserService:
             }
         if not targets:
             return
-        if getattr(self.vlm_parser, "enabled", None) is False:
-            result.warnings.append(
-                PipelineWarning(
-                    code="visual_fusion_unavailable",
-                    message="complex visual pages were retained because Qwen is disabled",
-                    backend=self.vlm_parser.name,
-                    details={"pages": sorted(targets)},
-                )
-            )
-            return
-        qwen_status = await self.vlm_parser.probe()
-        if not qwen_status.ready:
-            result.warnings.append(
-                PipelineWarning(
-                    code="visual_fusion_unavailable",
-                    message="complex visual pages were retained because Qwen is unavailable",
-                    backend=self.vlm_parser.name,
-                    details={"pages": sorted(targets)},
-                )
-            )
-            return
-
         glm_result: DocumentParseResult | None = None
         if bool(setting(self.settings, "glm_sdk_enabled", False)):
             glm_status = await self.glm_sdk_parser.probe()
@@ -1281,6 +1350,11 @@ class ParserService:
                         sdk_options,
                         document_id=document_id,
                         cancel_event=cancel_event,
+                        rotation_by_page={
+                            page_number: evidence.detected_rotation_degrees or 0
+                            for page_number, evidence in evidence_by_page.items()
+                            if page_number in targets
+                        },
                     )
                 except (ParserCancelledError, asyncio.CancelledError):
                     raise
@@ -1303,6 +1377,43 @@ class ParserService:
             if isinstance(page_number, int):
                 primary_fragments_by_page.setdefault(page_number, []).append(fragment)
 
+        glm_assessments: dict[int, GlmTableAssessment] = {}
+        for page_number, target_kind in targets.items():
+            if target_kind != "table":
+                continue
+            glm_assessments[page_number] = self.visual_fusion_service.assess_glm_table_candidate(
+                [
+                    fragment
+                    for fragment in glm_fragments_by_page.get(page_number, [])
+                    if isinstance(fragment, TableFragment)
+                ]
+            )
+        qwen_required = {
+            page_number
+            for page_number, target_kind in targets.items()
+            if target_kind == "signature"
+            or glm_assessments.get(
+                page_number,
+                GlmTableAssessment(route="full"),
+            ).route
+            != "accept"
+        }
+        qwen_ready = False
+        if qwen_required and getattr(self.vlm_parser, "enabled", None) is not False:
+            qwen_ready = (await self.vlm_parser.probe()).ready
+        if qwen_required and not qwen_ready:
+            result.warnings.append(
+                PipelineWarning(
+                    code="visual_fusion_unavailable",
+                    message=(
+                        "pages requiring row verification or full visual fallback were retained "
+                        "because Qwen is unavailable"
+                    ),
+                    backend=self.vlm_parser.name,
+                    details={"pages": sorted(qwen_required)},
+                )
+            )
+
         adopted: dict[int, PageParseResult] = {}
         visual_page_irs: dict[int, object] = {}
         replacement_fragments: list[object] = []
@@ -1323,6 +1434,19 @@ class ParserService:
             ]
             try:
                 if target_kind == "table":
+                    assessment = glm_assessments[page_number]
+                    if assessment.route == "full" and not qwen_ready:
+                        primary.status = PageStatus.WARNING
+                        primary.warnings.append(
+                            PipelineWarning(
+                                code="visual_fusion_partial",
+                                message="the table topology needs full visual fallback",
+                                page_number=page_number,
+                                backend=self.vlm_parser.name,
+                                details={"reasons": assessment.reasons},
+                            )
+                        )
+                        continue
                     outcome = await self.visual_fusion_service.fuse_table_page(
                         source,
                         options,
@@ -1331,8 +1455,12 @@ class ParserService:
                         glm_page,
                         glm_fragments,  # type: ignore[arg-type]
                         docling_fragments,  # type: ignore[arg-type]
+                        glm_assessment=assessment,
+                        allow_qwen=qwen_ready,
                     )
                 else:
+                    if not qwen_ready:
+                        continue
                     outcome = await self.visual_fusion_service.fuse_signature_page(
                         source,
                         options,
@@ -1376,22 +1504,45 @@ class ParserService:
                 and warning.code in self.visual_fusion_service._RESOLVED_WARNING_CODES
             )
         ]
-        result.pipeline.primary = "visual-fusion"
+        result.pipeline.primary = "adaptive-table-fusion"
         result.pipeline.ocr = (
             self.glm_sdk_parser.name if glm_result is not None else result.pipeline.ocr
         )
-        result.pipeline.vlm = self.vlm_parser.name
-        result._vlm_page_numbers.update(adopted)
+        qwen_pages = {
+            page_number
+            for page_number, page in adopted.items()
+            if page.diagnostics is not None
+            and page.diagnostics.visual_fusion is not None
+            and (page.diagnostics.visual_fusion.qwen_calls or 0) > 0
+        }
+        if qwen_pages:
+            result.pipeline.vlm = self.vlm_parser.name
+        result._vlm_page_numbers.update(qwen_pages)
         result.route_summary.vlm_pages = len(result._vlm_page_numbers)
+        route_counts = Counter(
+            page.diagnostics.visual_fusion.routing_decision
+            for page in adopted.values()
+            if page.diagnostics is not None and page.diagnostics.visual_fusion is not None
+        )
         result.warnings.append(
             PipelineWarning(
-                code="qwen_visual_fusion_used",
-                message=f"Qwen regional visual fusion assembled {len(adopted)} page(s)",
+                code="adaptive_table_routing_used",
+                message=f"adaptive table routing assembled {len(adopted)} page(s)",
                 severity=WarningSeverity.INFO,
-                backend=self.vlm_parser.name,
-                details={"pages": sorted(adopted)},
+                backend="adaptive-table-fusion",
+                details={"pages": sorted(adopted), "routes": dict(route_counts)},
             )
         )
+        if qwen_pages:
+            result.warnings.append(
+                PipelineWarning(
+                    code="qwen_visual_fusion_used",
+                    message=f"Qwen verified or rebuilt {len(qwen_pages)} page(s)",
+                    severity=WarningSeverity.INFO,
+                    backend=self.vlm_parser.name,
+                    details={"pages": sorted(qwen_pages)},
+                )
+            )
 
     async def parse(
         self,
@@ -1519,11 +1670,15 @@ class ParserService:
                         self._normalize_directory_pages(result, evidence_by_page)
                         self._finalize_exports(result, parsed_options)
                         self.quality_service.assess(result)
-                        visual_requested = (
-                            parsed_options.profile.value == "accurate"
-                            and parsed_options.resolved_vlm_policy == VlmPolicy.AUTO_VISUAL
+                        skip_scans = (
+                            stored.mime_type == "application/pdf"
+                            and parsed_options.scan_policy == ScanPolicy.SKIP
                         )
-                        if visual_requested:
+                        if skip_scans:
+                            self._skip_scanned_pdf_pages(result, evidence_by_page)
+                            self._finalize_exports(result, parsed_options)
+                            self.quality_service.assess(result)
+                        elif parsed_options.resolved_vlm_policy == VlmPolicy.AUTO_VISUAL:
                             await self._apply_visual_fusion(
                                 result,
                                 stored,
@@ -1553,14 +1708,6 @@ class ParserService:
                         )
                         result.markdown = result.parse_result.renderings.markdown
                         result.plain_text = result.parse_result.renderings.plain_text
-                        if not parsed_options.include_renderings:
-                            result.parse_result.renderings.markdown = ""
-                            result.parse_result.renderings.plain_text = ""
-                            for page_ir in result.parse_result.units:
-                                page_ir.renderings.markdown = ""
-                                page_ir.renderings.plain_text = ""
-                            result.markdown = ""
-                            result.plain_text = ""
                         return result
                 finally:
                     await self._leave_parse()
@@ -1571,7 +1718,9 @@ class ParserService:
         except ParserCancelledError as exc:
             raise ServiceError("job_cancelled", str(exc), status_code=409) from exc
         except ParserUnavailableError as exc:
-            details: dict[str, object] = {"profile": parsed_options.profile.value}
+            details: dict[str, object] = {
+                "scan_policy": parsed_options.scan_policy.value
+            }
             if exc.details:
                 details.update(exc.details)
             raise ServiceError(

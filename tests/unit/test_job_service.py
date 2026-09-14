@@ -13,6 +13,7 @@ from app.models import (
     JobStatus,
     PageParseResult,
     ParsePipeline,
+    ParseProfile,
     RouteSummary,
     ServiceError,
     StoredSource,
@@ -288,6 +289,7 @@ async def test_retry_admission_precedes_copy_and_token_is_reusable(
             input_bytes=content_path.stat().st_size,
             page_count=1,
             source_path=str(content_path),
+            options=ContentParseOptions(profile=ParseProfile.FAST),
         )
     )
     copy_calls = 0
@@ -327,6 +329,8 @@ async def test_retry_admission_precedes_copy_and_token_is_reusable(
     retried = await jobs.retry_job("job_retry_original")
     assert retried.parent_job_id == "job_retry_original"
     assert retried.attempt == 2
+    assert retried.options.profile == ParseProfile.BALANCED
+    assert retried.options.scan_policy.value == "skip"
     assert copy_calls == 2
 
     await jobs.shutdown()

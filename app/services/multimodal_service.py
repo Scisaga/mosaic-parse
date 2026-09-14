@@ -288,9 +288,7 @@ class MultimodalService:
                 size_bytes=asset.size_bytes,
                 page_count=1,
             )
-            child_options = options.model_copy(
-                update={"unit_range": "1", "include_renderings": True}
-            )
+            child_options = options.model_copy(update={"unit_range": "1"})
             try:
                 child = await image_parser.parse(
                     child_source,
@@ -487,7 +485,7 @@ class MultimodalService:
         image_parser: DocumentParser | None = None,
         cancel_event: object | None = None,
     ) -> None:
-        """Add a source image or semantic PDF picture crops to the parse result."""
+        """Add a source image or detected PDF picture crops to the parse result."""
 
         if source.mime_type.startswith("image/"):
             content = await asyncio.to_thread(source.path.read_bytes)
@@ -582,7 +580,9 @@ class MultimodalService:
             if unit is None:
                 continue
             try:
-                page_image = await self.vlm._render(source, page_number, options.profile.value)
+                page_image = await self.vlm._render(
+                    source, page_number, options.visual_profile.value
+                )
                 crop = await asyncio.to_thread(self.vlm._crop_normalized_image, page_image, bbox)
                 asset, _ = await self._persist_image_asset(
                     result.document_id,
@@ -593,7 +593,9 @@ class MultimodalService:
                 )
                 current_asset = self._merge_asset(parse_result.assets, asset)
                 if (
-                    current_asset.visual_analysis is None
+                    options.describe_images
+                    and bool(getattr(picture, "allow_description", True))
+                    and current_asset.visual_analysis is None
                     and "embedded_image_analysis_failed"
                     not in current_asset.warning_codes
                 ):
@@ -629,27 +631,43 @@ class MultimodalService:
 
     @staticmethod
     def _project_asset_descriptions(parse_result: ContentParseResult) -> None:
-        described = [
+        projected = [
             asset
             for asset in parse_result.assets
             if asset.role not in {AssetRole.SOURCE, AssetRole.PREVIEW}
-            and asset.visual_analysis is not None
         ]
-        if not described:
+        if not projected:
             return
-        markdown = [parse_result.renderings.markdown.rstrip(), "", "## 图片资产"]
+        markdown = [
+            parse_result.renderings.markdown.rstrip(),
+            "",
+            "## 图片资产",
+        ]
         plain = [parse_result.renderings.plain_text.rstrip(), "", "图片资产："]
-        for asset in described:
+        for asset in projected:
             analysis = asset.visual_analysis
+            page_number = next(
+                (
+                    location.page_number
+                    for location in asset.locations
+                    if location.page_number is not None
+                ),
+                None,
+            )
+            location = f"，第 {page_number} 页" if page_number is not None else ""
+            markdown.append(
+                f"- **{asset.filename}**（{asset.role.value}{location}，"
+                f"资产 ID：`{asset.asset_id}`）：[下载]({asset.download_url})"
+            )
             if analysis is None:
+                plain.append(f"- {asset.asset_id}：{asset.download_url}")
                 continue
             description = analysis.detailed_description or analysis.summary
-            markdown.extend(["", f"- `{asset.asset_id}`：{description}"])
+            markdown.append(f"  - 描述：{' '.join(description.split())}")
             plain.append(f"- {asset.asset_id}：{description}")
             visible_text = analysis.visible_text.strip()
             if visible_text:
-                indented = visible_text.replace("\n", "\n    ")
-                markdown.append(f"  - 可见文本：{indented}")
+                markdown.append(f"  - 可见文字：{' '.join(visible_text.split())}")
                 plain.append(f"  可见文本：{visible_text}")
         parse_result.renderings.markdown = "\n".join(markdown).strip()
         parse_result.renderings.plain_text = "\n".join(plain).strip()
@@ -906,7 +924,8 @@ class MultimodalService:
             if asset.asset_id not in unit.asset_ids:
                 unit.asset_ids.append(asset.asset_id)
             if (
-                asset.visual_analysis is None
+                options.describe_images
+                and asset.visual_analysis is None
                 and "embedded_image_analysis_failed" not in asset.warning_codes
             ):
                 try:
@@ -974,12 +993,6 @@ class MultimodalService:
         self._project_asset_descriptions(parse_result)
         result.markdown = parse_result.renderings.markdown
         result.plain_text = parse_result.renderings.plain_text
-        if not options.include_renderings:
-            parse_result.renderings = ContentRenderings()
-            for unit in parse_result.units:
-                unit.renderings = ContentRenderings()
-            result.markdown = ""
-            result.plain_text = ""
         result.parse_result = parse_result
         return result
 
@@ -1363,8 +1376,8 @@ class MultimodalService:
             assets=assets,
             video_analysis=video_analysis,
             renderings=ContentRenderings(
-                markdown=markdown if options.include_renderings else "",
-                plain_text=plain_text if options.include_renderings else "",
+                markdown=markdown,
+                plain_text=plain_text,
             ),
             diagnostics=ContentQualitySummary(trusted_units=1, visual_units=1),
             runtime=ParseRuntime(
@@ -1385,14 +1398,14 @@ class MultimodalService:
             mime_type=source.mime_type,
             page_count=1,
             processed_pages=1,
-            markdown=markdown if options.include_renderings else "",
-            plain_text=plain_text if options.include_renderings else "",
+            markdown=markdown,
+            plain_text=plain_text,
             pages=[
                 PageParseResult(
                     page_number=1,
                     backend="ffmpeg+vlm",
-                    content=markdown if options.include_renderings else "",
-                    plain_text=plain_text if options.include_renderings else "",
+                    content=markdown,
+                    plain_text=plain_text,
                     diagnostics=PageDiagnostics(source_kind=PageSourceKind.MIXED),
                     duration_ms=duration_ms,
                 )

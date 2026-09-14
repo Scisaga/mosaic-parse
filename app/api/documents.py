@@ -5,14 +5,15 @@ from __future__ import annotations
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, Form, Request, Response, UploadFile, status
+from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from app.api.dependencies import get_runtime, require_api_key
-from app.api.schemas import JobResponse, ParseResponse
+from app.api.schemas import JobResponse
 from app.models import (
     ContentParseOptions,
     JobRecord,
-    ParseProfile,
+    ScanPolicy,
     ServiceError,
 )
 
@@ -31,6 +32,8 @@ _REMOVED_OPTION_FIELDS = frozenset(
         "preserve_page_breaks",
         "include_pages",
         "include_diagnostics",
+        "include_renderings",
+        "profile",
     }
 )
 
@@ -49,20 +52,20 @@ async def _reject_removed_options(request: Request) -> None:
 
 def _options(
     *,
-    profile: ParseProfile,
+    scan_policy: Literal["auto", "skip"],
     unit_range: str | None,
     language: str,
+    describe_images: bool,
     description_language: Literal["zh-CN", "en", "auto"],
-    include_renderings: bool,
     timeout_seconds: int | None,
 ) -> ContentParseOptions:
     try:
         return ContentParseOptions(
-            profile=profile,
+            scan_policy=ScanPolicy(scan_policy),
             unit_range=unit_range,
             language=[item.strip() for item in language.split(",") if item.strip()],
+            describe_images=describe_images,
             description_language=description_language,
-            include_renderings=include_renderings,
             timeout_seconds=timeout_seconds,
         )
     except ValidationError as exc:
@@ -93,34 +96,44 @@ def _validate_source(file: UploadFile | None, source_url: str | None) -> None:
 
 @router.post(
     "/parse",
-    response_model=ParseResponse | JobResponse,
+    response_model=None,
+    response_class=Response,
     summary="Parse content synchronously or automatically create an asynchronous job",
+    responses={
+        200: {"content": {"text/markdown": {}}, "description": "GFM Markdown"},
+        202: {"model": JobResponse, "description": "Asynchronous job"},
+    },
 )
 async def parse_content(
     request: Request,
-    response: Response,
     file: Annotated[
         UploadFile | None, File(description="Supported document, image, or video")
     ] = None,
     source_url: Annotated[str | None, Form(description="HTTP(S) content URL")] = None,
-    profile: Annotated[ParseProfile, Form()] = ParseProfile.BALANCED,
+    scan_policy: Annotated[
+        Literal["auto", "skip"],
+        Form(description="Automatically process scanned PDF pages or skip them"),
+    ] = "auto",
     unit_range: Annotated[
         str | None, Form(description="One-based page or slide ranges, e.g. 1-5,8")
     ] = None,
     language: Annotated[str, Form(description="Comma-separated OCR languages")] = "zh,en",
+    describe_images: Annotated[
+        bool,
+        Form(description="Generate model descriptions for embedded images"),
+    ] = False,
     description_language: Annotated[Literal["zh-CN", "en", "auto"], Form()] = "zh-CN",
-    include_renderings: Annotated[bool, Form()] = True,
     timeout_seconds: Annotated[int | None, Form(ge=1, le=86_400)] = None,
     prefer_async: Annotated[bool, Form()] = False,
-) -> ParseResponse | JobResponse:
+) -> Response:
     await _reject_removed_options(request)
     _validate_source(file, source_url)
     options = _options(
-        profile=profile,
+        scan_policy=scan_policy,
         unit_range=unit_range,
         language=language,
+        describe_images=describe_images,
         description_language=description_language,
-        include_renderings=include_renderings,
         timeout_seconds=timeout_seconds,
     )
     runtime = get_runtime(request)
@@ -131,11 +144,19 @@ async def parse_content(
         prefer_async=prefer_async,
     )
     if isinstance(result, JobRecord):
-        response.status_code = status.HTTP_202_ACCEPTED
-        return JobResponse.from_record(result)
-    if result.parse_result is None:
-        raise ServiceError("result_missing", "content parse result was not produced", status_code=500)
-    return result.parse_result
+        payload = JobResponse.from_record(result)
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content=payload.model_dump(mode="json", exclude_none=True),
+        )
+    return Response(
+        content=result.markdown,
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            "X-Content-ID": result.document_id,
+            "Location": f"/v1/content/jobs/{result.document_id}/result",
+        },
+    )
 
 
 @router.post(
@@ -150,23 +171,29 @@ async def create_content_job(
         UploadFile | None, File(description="Supported document, image, or video")
     ] = None,
     source_url: Annotated[str | None, Form(description="HTTP(S) content URL")] = None,
-    profile: Annotated[ParseProfile, Form()] = ParseProfile.BALANCED,
+    scan_policy: Annotated[
+        Literal["auto", "skip"],
+        Form(description="Automatically process scanned PDF pages or skip them"),
+    ] = "auto",
     unit_range: Annotated[
         str | None, Form(description="One-based page or slide ranges, e.g. 1-5,8")
     ] = None,
     language: Annotated[str, Form(description="Comma-separated OCR languages")] = "zh,en",
+    describe_images: Annotated[
+        bool,
+        Form(description="Generate model descriptions for embedded images"),
+    ] = False,
     description_language: Annotated[Literal["zh-CN", "en", "auto"], Form()] = "zh-CN",
-    include_renderings: Annotated[bool, Form()] = True,
     timeout_seconds: Annotated[int | None, Form(ge=1, le=86_400)] = None,
 ) -> JobResponse:
     await _reject_removed_options(request)
     _validate_source(file, source_url)
     options = _options(
-        profile=profile,
+        scan_policy=scan_policy,
         unit_range=unit_range,
         language=language,
+        describe_images=describe_images,
         description_language=description_language,
-        include_renderings=include_renderings,
         timeout_seconds=timeout_seconds,
     )
     job = await get_runtime(request).job_service.create_job(

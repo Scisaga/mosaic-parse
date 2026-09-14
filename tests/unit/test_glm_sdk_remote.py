@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
+from PIL import Image
 
 from app.models import (
     BackendState,
@@ -57,7 +60,7 @@ async def test_sdk_adapter_renders_region_json_and_table_spans(native_pdf: Path)
                             "label": "image",
                             "native_label": "seal",
                             "content": "",
-                            "bbox_2d": [700, 800, 950, 980],
+                            "bbox_2d": [700, 700, 950, 900],
                         },
                     ]
                 ],
@@ -96,8 +99,29 @@ async def test_sdk_adapter_renders_region_json_and_table_spans(native_pdf: Path)
         ["收入", "100", "90"],
     ]
     assert table.has_column_header is True
+    assert table.visual_obstructions == [(0.7, 0.7, 0.95, 0.9)]
     assert result.route_summary.ocr_regions == 3
     await client.aclose()
+
+
+async def test_pdf_page_is_physically_rotated_before_glm_submission(native_pdf: Path) -> None:
+    parser = GlmSdkRemoteParser(
+        SimpleNamespace(
+            glm_sdk_enabled=True,
+            glm_sdk_url="http://sdk:5002/glmocr/parse",
+            glm_sdk_render_scale=1,
+        )
+    )
+
+    normal_uri = parser._render_page(_source(native_pdf), 1, 0)
+    rotated_uri = parser._render_page(_source(native_pdf), 1, 90)
+    with Image.open(io.BytesIO(base64.b64decode(normal_uri.partition(",")[2]))) as normal:
+        normal_size = normal.size
+    with Image.open(io.BytesIO(base64.b64decode(rotated_uri.partition(",")[2]))) as rotated:
+        rotated_size = rotated.size
+
+    assert rotated_size == (normal_size[1], normal_size[0])
+    await parser.close()
 
 
 async def test_sdk_adapter_timeout_stops_later_page_calls(native_pdf: Path, monkeypatch) -> None:
@@ -121,7 +145,9 @@ async def test_sdk_adapter_timeout_stops_later_page_calls(native_pdf: Path, monk
         http_client=client,
     )
     monkeypatch.setattr(
-        parser, "_render_page", lambda source, page_number: "data:image/png;base64,eA=="
+        parser,
+        "_render_page",
+        lambda source, page_number, rotation_degrees=0: "data:image/png;base64,eA==",
     )
 
     result = await parser.parse(

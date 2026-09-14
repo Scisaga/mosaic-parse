@@ -1,6 +1,7 @@
 import type {
   ApiErrorBody,
   BackendCapability,
+  ContentAsset,
   ContentJob,
   JobEvent,
   JobProgress,
@@ -107,11 +108,11 @@ export function buildParseForm(source: SourceSelection, options: ParseOptions): 
   const data = new FormData()
   if (source.kind === 'file' && source.file) data.append('file', source.file, source.file.name)
   if (source.kind === 'url' && source.url.trim()) data.append('source_url', source.url.trim())
-  data.append('profile', options.profile)
+  data.append('scan_policy', options.scanPolicy)
   if (options.unitRange.trim()) data.append('unit_range', options.unitRange.trim())
   data.append('language', options.language.trim() || 'zh,en')
+  data.append('describe_images', String(options.describeImages))
   data.append('description_language', options.descriptionLanguage)
-  data.append('include_renderings', String(options.includeRenderings))
   if (options.timeoutSeconds > 0) data.append('timeout_seconds', String(options.timeoutSeconds))
   return data
 }
@@ -160,12 +161,22 @@ export async function createContentJob(source: SourceSelection, options: ParseOp
   return normalizeJob(await response.json())
 }
 
-export async function parseContent(source: SourceSelection, options: ParseOptions): Promise<ParseResult> {
+export async function parseContent(
+  source: SourceSelection,
+  options: ParseOptions,
+): Promise<ParseResult | ContentJob> {
   const response = await request('/v1/content/parse', {
     method: 'POST',
     body: buildParseForm(source, options),
+    headers: { Accept: 'text/markdown, application/json' },
   })
-  return await response.json() as ParseResult
+  if (response.status === 202 || response.headers.get('content-type')?.includes('application/json')) {
+    return normalizeJob(await response.json())
+  }
+  const contentId = response.headers.get('x-content-id') ?? ''
+  const markdown = await response.text()
+  const assets = contentId ? await getContentAssets(contentId) : []
+  return markdownResult(contentId, markdown, assets, source.file?.name)
 }
 
 export async function getContentJob(jobId: string): Promise<ContentJob> {
@@ -173,13 +184,36 @@ export async function getContentJob(jobId: string): Promise<ContentJob> {
   return normalizeJob(await response.json())
 }
 
+export async function getContentAssets(jobId: string): Promise<ContentAsset[]> {
+  const response = await request(`/v1/content/jobs/${encodeURIComponent(jobId)}/assets`)
+  return await response.json() as ContentAsset[]
+}
+
+function markdownResult(
+  contentId: string,
+  markdown: string,
+  assets: ContentAsset[],
+  filename?: string,
+): ParseResult {
+  return {
+    content_id: contentId,
+    filename,
+    markdown,
+    assets,
+  }
+}
+
 export async function getContentResult(jobId: string): Promise<ResultBundle> {
-  const response = await request(`/v1/content/jobs/${encodeURIComponent(jobId)}/result`)
-  const result = await response.json() as ParseResult
+  const encoded = encodeURIComponent(jobId)
+  const [resultResponse, assets] = await Promise.all([
+    request(`/v1/content/jobs/${encoded}/result`, { headers: { Accept: 'text/markdown' } }),
+    getContentAssets(jobId),
+  ])
+  const markdown = await resultResponse.text()
+  const result = markdownResult(jobId, markdown, assets)
   return {
     result,
-    markdown: result.renderings.markdown,
-    text: result.renderings.plain_text,
+    markdown,
   }
 }
 

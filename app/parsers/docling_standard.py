@@ -10,12 +10,13 @@ import re
 import threading
 import time
 from collections import Counter, OrderedDict
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
 from app.models.backend import BackendState, BackendStatus
-from app.models.parse_options import ContentParseOptions, ParseProfile
+from app.models.parse_options import ContentParseOptions, ParseProfile, ScanPolicy
 from app.models.parse_result import (
     DocumentParseResult,
     PageParseResult,
@@ -101,10 +102,17 @@ class DoclingStandardParser(DocumentParser):
     def __init__(self, settings: object | None, glm_adapter: GlmOcrRemoteAdapter) -> None:
         self.settings = settings
         self.glm_adapter = glm_adapter
-        self._worker_count = int(setting(settings, "parser_workers", 1))
-        self._available_slots: asyncio.Queue[int] = asyncio.Queue(maxsize=self._worker_count)
-        for slot in range(self._worker_count):
+        self._document_worker_count = int(setting(settings, "parser_workers", 1))
+        self._page_worker_count = int(setting(settings, "docling_page_workers", 1))
+        self._converter_count = self._document_worker_count * self._page_worker_count
+        self._num_threads = int(setting(settings, "docling_num_threads", 4))
+        self._parallel_min_pages = int(
+            setting(settings, "docling_page_parallel_min_pages", 4)
+        )
+        self._available_slots: asyncio.Queue[int] = asyncio.Queue(maxsize=self._converter_count)
+        for slot in range(self._converter_count):
             self._available_slots.put_nowait(slot)
+        self._slot_reservation_lock = asyncio.Lock()
         self._converters: OrderedDict[tuple[int, str, bool, tuple[str, ...], bool], object] = (
             OrderedDict()
         )
@@ -127,7 +135,7 @@ class DoclingStandardParser(DocumentParser):
             languages = list(getattr(self.settings, "default_languages", None) or ["zh", "en"])
             # Build and initialize every configured worker's balanced pipeline.
             # This loads/verifies model artifacts before /ready can report true.
-            for worker_slot in range(self._worker_count):
+            for worker_slot in range(self._converter_count):
                 await asyncio.to_thread(
                     self._initialize_converter_slot,
                     worker_slot,
@@ -148,7 +156,11 @@ class DoclingStandardParser(DocumentParser):
             return BackendStatus(
                 name=self.name,
                 state=BackendState.READY,
-                detail=f"{len(self._converters)} converter profile(s) cached",
+                detail=(
+                    f"{len(self._converters)} converter profile(s) cached; "
+                    f"{self._num_threads} CPU thread(s) each, "
+                    f"{self._page_worker_count} page worker(s) per document"
+                ),
             )
         return BackendStatus(
             name=self.name,
@@ -173,7 +185,7 @@ class DoclingStandardParser(DocumentParser):
         converter = self._build_converter(profile, force_full_page_ocr, languages, glm_ready)
         self._converters[key] = converter
         self._converters.move_to_end(key)
-        while len(self._converters) > max(16, self._worker_count * 4):
+        while len(self._converters) > max(16, self._converter_count * 4):
             self._converters.popitem(last=False)
         return converter
 
@@ -258,7 +270,10 @@ class DoclingStandardParser(DocumentParser):
             enable_remote_services=bool(glm_ready),
             artifacts_path=artifacts_path,
             document_timeout=float(setting(self.settings, "content_timeout_seconds", 900)),
-            accelerator_options=AcceleratorOptions(device=device),
+            accelerator_options=AcceleratorOptions(
+                device=device,
+                num_threads=self._num_threads,
+            ),
         )
         # torch.compile has a very large first-document cost on the default CPU
         # deployment. It remains opt-in for sustained-throughput installations.
@@ -497,6 +512,107 @@ class DoclingStandardParser(DocumentParser):
                 self._set_pipeline_progress_sink(pipeline, None)
 
     @staticmethod
+    def _split_page_group(
+        page_group: tuple[int, int],
+        worker_count: int,
+    ) -> list[tuple[int, int]]:
+        """Split one contiguous range into balanced contiguous worker chunks."""
+
+        page_count = page_group[1] - page_group[0] + 1
+        chunk_count = min(max(1, worker_count), page_count)
+        base_size, remainder = divmod(page_count, chunk_count)
+        result: list[tuple[int, int]] = []
+        start = page_group[0]
+        for index in range(chunk_count):
+            size = base_size + (1 if index < remainder else 0)
+            end = start + size - 1
+            result.append((start, end))
+            start = end + 1
+        return result
+
+    def _is_native_pdf_for_parallelism(
+        self,
+        source: StoredSource,
+        page_group: tuple[int, int],
+    ) -> bool:
+        """Conservatively keep scanned/mixed PDFs on the single-converter path."""
+
+        if source.mime_type != "application/pdf":
+            return False
+        minimum_characters = max(
+            1,
+            int(setting(self.settings, "quality_sparse_native_characters", 40)),
+        )
+        try:
+            import pymupdf
+
+            with pymupdf.open(source.path) as document:
+                if page_group[1] > document.page_count:
+                    return False
+                for page_number in range(page_group[0], page_group[1] + 1):
+                    text = document.load_page(page_number - 1).get_text("text")
+                    if len(re.sub(r"\s+", "", str(text or ""))) < minimum_characters:
+                        return False
+        except (OSError, RuntimeError, ValueError):
+            logger.warning(
+                "failed to inspect native text before Docling page parallelism",
+                exc_info=True,
+            )
+            return False
+        return True
+
+    async def _conversion_batches(
+        self,
+        source: StoredSource,
+        pages: list[int],
+        page_groups: list[tuple[int, int]],
+    ) -> list[list[tuple[int, int]]]:
+        """Return sequential batches, with at most one parallel native-PDF batch."""
+
+        if (
+            self._page_worker_count <= 1
+            or len(page_groups) != 1
+            or len(pages) < self._parallel_min_pages
+            or source.mime_type != "application/pdf"
+        ):
+            return [[page_group] for page_group in page_groups]
+        page_group = page_groups[0]
+        is_native = await asyncio.to_thread(
+            self._is_native_pdf_for_parallelism,
+            source,
+            page_group,
+        )
+        if not is_native:
+            return [[page_group]]
+        chunks = self._split_page_group(page_group, self._page_worker_count)
+        logger.info(
+            "parallelizing native PDF across %d cached Docling converters: %s",
+            len(chunks),
+            chunks,
+        )
+        return [chunks]
+
+    async def _reserve_converter_slots(self, count: int) -> list[int]:
+        """Reserve a complete page-worker set without inter-document deadlocks."""
+
+        if count < 1 or count > self._converter_count:
+            raise RuntimeError(f"invalid Docling converter reservation: {count}")
+        reserved: list[int] = []
+        async with self._slot_reservation_lock:
+            try:
+                for _ in range(count):
+                    reserved.append(await self._available_slots.get())
+            except BaseException:
+                for worker_slot in reserved:
+                    self._available_slots.put_nowait(worker_slot)
+                raise
+        return reserved
+
+    def _release_converter_slots(self, worker_slots: list[int]) -> None:
+        for worker_slot in worker_slots:
+            self._available_slots.put_nowait(worker_slot)
+
+    @staticmethod
     def _converter_pipeline(converter: object, mime_type: str) -> object | None:
         """Return the already-cached standard pipeline for this source format."""
 
@@ -520,10 +636,10 @@ class DoclingStandardParser(DocumentParser):
         progress_sink: queue.Queue[int],
         callback: ProgressCallback | None,
         *,
-        completed_before_group: int,
         total: int,
         selected_pages: set[int],
         announced_pages: set[int],
+        progress_lock: asyncio.Lock,
     ) -> None:
         """Forward real Docling page-boundary events while conversion is running."""
 
@@ -533,11 +649,302 @@ class DoclingStandardParser(DocumentParser):
             except queue.Empty:
                 await asyncio.sleep(0.025)
                 continue
-            if page_number not in selected_pages or page_number in announced_pages:
-                continue
-            announced_pages.add(page_number)
-            current = min(total, completed_before_group + len(announced_pages))
-            await DoclingStandardParser._notify(callback, current, total, "page.processed")
+            async with progress_lock:
+                if page_number not in selected_pages or page_number in announced_pages:
+                    continue
+                announced_pages.add(page_number)
+                current = min(total, len(announced_pages))
+                await DoclingStandardParser._notify(callback, current, total, "page.processed")
+
+    async def _convert_batch(
+        self,
+        worker_slots: list[int],
+        page_groups: list[tuple[int, int]],
+        source: StoredSource,
+        options: ContentParseOptions,
+        force_ocr: bool,
+        glm_ready: bool,
+        progress_callback: ProgressCallback | None,
+        selected_pages: set[int],
+        announced_pages: set[int],
+        progress_lock: asyncio.Lock,
+        deferred_release_slots: set[int],
+    ) -> list[tuple[tuple[int, int], object]]:
+        """Run independent converter slots concurrently and preserve chunk order."""
+
+        entries: list[
+            tuple[
+                int,
+                tuple[int, int],
+                asyncio.Task[object],
+                asyncio.Task[None],
+            ]
+        ] = []
+        for worker_slot, page_group in zip(worker_slots, page_groups, strict=True):
+            progress_sink: queue.Queue[int] = queue.Queue()
+            conversion_task = asyncio.create_task(
+                asyncio.to_thread(
+                    self._convert_in_slot,
+                    worker_slot,
+                    source,
+                    page_group,
+                    options,
+                    force_ocr,
+                    glm_ready,
+                    progress_sink,
+                )
+            )
+            self._inflight_conversions.add(conversion_task)
+            conversion_task.add_done_callback(self._inflight_conversions.discard)
+            progress_task = asyncio.create_task(
+                self._drain_pipeline_progress(
+                    conversion_task,
+                    progress_sink,
+                    progress_callback,
+                    total=len(selected_pages),
+                    selected_pages=selected_pages,
+                    announced_pages=announced_pages,
+                    progress_lock=progress_lock,
+                )
+            )
+            entries.append((worker_slot, page_group, conversion_task, progress_task))
+
+        aggregate = asyncio.gather(
+            *(conversion_task for _, _, conversion_task, _ in entries),
+            return_exceptions=True,
+        )
+        try:
+            conversion_results = await asyncio.shield(aggregate)
+        except asyncio.CancelledError:
+            # Python threads cannot be cancelled. Each active converter remains
+            # reserved until its own conversion has actually returned.
+            for worker_slot, _, conversion_task, _ in entries:
+                deferred_release_slots.add(worker_slot)
+
+                def release_when_done(
+                    _task: asyncio.Task[object],
+                    *,
+                    slot: int = worker_slot,
+                ) -> None:
+                    self._available_slots.put_nowait(slot)
+
+                conversion_task.add_done_callback(release_when_done)
+            for _, _, _, progress_task in entries:
+                progress_task.cancel()
+            await asyncio.gather(
+                *(progress_task for _, _, _, progress_task in entries),
+                return_exceptions=True,
+            )
+            raise
+
+        progress_results = await asyncio.gather(
+            *(progress_task for _, _, _, progress_task in entries),
+            return_exceptions=True,
+        )
+        for progress_result in progress_results:
+            if isinstance(progress_result, BaseException):
+                raise progress_result
+        for conversion_result in conversion_results:
+            if isinstance(conversion_result, BaseException):
+                raise conversion_result
+        return [
+            (page_group, conversion_result)
+            for (_, page_group, _, _), conversion_result in zip(
+                entries,
+                conversion_results,
+                strict=True,
+            )
+        ]
+
+    async def _iter_conversions(
+        self,
+        worker_slots: list[int],
+        conversion_batches: list[list[tuple[int, int]]],
+        source: StoredSource,
+        options: ContentParseOptions,
+        force_ocr: bool,
+        glm_ready: bool,
+        progress_callback: ProgressCallback | None,
+        selected_pages: set[int],
+        announced_pages: set[int],
+        progress_lock: asyncio.Lock,
+        deferred_release_slots: set[int],
+        cancel_event: object | None,
+    ) -> AsyncIterator[tuple[tuple[int, int], object]]:
+        for page_groups in conversion_batches:
+            if self._cancelled(cancel_event):
+                raise ParserCancelledError("job was cancelled")
+            converted = await self._convert_batch(
+                worker_slots[: len(page_groups)],
+                page_groups,
+                source,
+                options,
+                force_ocr,
+                glm_ready,
+                progress_callback,
+                selected_pages,
+                announced_pages,
+                progress_lock,
+                deferred_release_slots,
+            )
+            for conversion in converted:
+                yield conversion
+
+    async def _export_conversion(
+        self,
+        page_group: tuple[int, int],
+        conversion: object,
+        *,
+        page_backend: str,
+        cancel_event: object | None,
+        progress_callback: ProgressCallback | None,
+        completed_count: int,
+        total_pages: int,
+    ) -> tuple[list[PageParseResult], list[PictureCandidate], list[object], int]:
+        status_text = str(getattr(conversion, "status", "success")).lower()
+        if status_text.endswith("failure") or status_text.endswith("skipped"):
+            messages = self._conversion_error_messages(conversion)
+            raise ParserError(
+                "Docling reported conversion failure",
+                details={"errors": messages},
+            )
+        document = getattr(conversion, "document", None)
+        if document is None:
+            raise ParserError("Docling returned no document")
+        error_messages = self._conversion_error_messages(conversion)
+        picture_candidates = self._extract_picture_candidates(document, page_group)
+        group_table_fragments = extract_table_fragments(document, page_group)
+        overlapping_duplicates = self._overlapping_text_duplicate_counts(document, page_group)
+        parsed_pages: list[PageParseResult] = []
+
+        for page_number in range(page_group[0], page_group[1] + 1):
+            if self._cancelled(cancel_event):
+                raise ParserCancelledError("job was cancelled")
+            page_started = time.perf_counter()
+            try:
+                markdown = await asyncio.to_thread(
+                    export_page_markdown,
+                    document,
+                    page_number,
+                    group_table_fragments,
+                )
+                duplicate_counts = overlapping_duplicates.get(page_number, Counter())
+                markdown = self._remove_overlapping_text_duplicates(
+                    markdown,
+                    duplicate_counts,
+                )
+                export_text = getattr(document, "export_to_text", None)
+                plain_text = (
+                    await asyncio.to_thread(export_text, page_no=page_number)
+                    if export_text
+                    else None
+                )
+                page_warnings: list[PipelineWarning] = []
+                page_status = PageStatus.COMPLETED
+                if error_messages:
+                    page_status = PageStatus.WARNING
+                    page_warnings.append(
+                        PipelineWarning(
+                            code="docling_partial_conversion",
+                            message="Docling reported one or more conversion errors",
+                            page_number=page_number,
+                            backend=self.name,
+                            details={"errors": error_messages[:5]},
+                        )
+                    )
+                invalid_tables = [
+                    fragment
+                    for fragment in group_table_fragments
+                    if fragment.page_number == page_number and not fragment.valid
+                ]
+                if invalid_tables:
+                    page_status = PageStatus.WARNING
+                    page_warnings.append(
+                        PipelineWarning(
+                            code="table_structure_invalid",
+                            message=(
+                                "one or more Docling tables contain invalid or overlapping "
+                                "cell spans"
+                            ),
+                            page_number=page_number,
+                            backend=self.name,
+                            details={
+                                "fragments": [
+                                    {
+                                        "id": fragment.fragment_id,
+                                        "reasons": fragment.invalid_reasons,
+                                    }
+                                    for fragment in invalid_tables
+                                ]
+                            },
+                        )
+                    )
+                if duplicate_counts:
+                    page_warnings.append(
+                        PipelineWarning(
+                            code="overlapping_ocr_boxes_deduplicated",
+                            message=(
+                                "identical text from highly overlapping OCR boxes was emitted "
+                                "once"
+                            ),
+                            severity=WarningSeverity.INFO,
+                            page_number=page_number,
+                            backend=self.name,
+                            details={
+                                "removed_items": sum(duplicate_counts.values()),
+                                "minimum_iou": 0.8,
+                            },
+                        )
+                    )
+                parsed_pages.append(
+                    PageParseResult(
+                        page_number=page_number,
+                        status=page_status,
+                        backend=page_backend,
+                        content=str(markdown or ""),
+                        plain_text=str(plain_text) if plain_text is not None else None,
+                        duration_ms=max(
+                            0,
+                            round((time.perf_counter() - page_started) * 1000),
+                        ),
+                        warnings=page_warnings,
+                    )
+                )
+            except Exception as exc:
+                parsed_pages.append(
+                    PageParseResult(
+                        page_number=page_number,
+                        status=PageStatus.FAILED,
+                        backend=page_backend,
+                        duration_ms=max(
+                            0,
+                            round((time.perf_counter() - page_started) * 1000),
+                        ),
+                        warnings=[
+                            PipelineWarning(
+                                code="page_export_failed",
+                                message=f"failed to export page: {type(exc).__name__}",
+                                severity=WarningSeverity.ERROR,
+                                page_number=page_number,
+                                backend=self.name,
+                            )
+                        ],
+                    )
+                )
+            completed_count += 1
+            emitted_status = parsed_pages[-1].status
+            event_name = {
+                PageStatus.COMPLETED: "page.completed",
+                PageStatus.WARNING: "page.warning",
+                PageStatus.FAILED: "page.failed",
+            }[emitted_status]
+            await self._notify(progress_callback, completed_count, total_pages, event_name)
+        return (
+            parsed_pages,
+            list(picture_candidates),
+            list(group_table_fragments),
+            completed_count,
+        )
 
     async def parse(
         self,
@@ -557,213 +964,71 @@ class DoclingStandardParser(DocumentParser):
         pages = parse_page_range(options.page_range, source.page_count)
         page_groups = group_consecutive_pages(pages)
         glm_status = await self.glm_adapter.probe()
+        glm_ready = glm_status.ready and not (
+            source.mime_type == "application/pdf"
+            and options.scan_policy == ScanPolicy.SKIP
+        )
         force_ocr = False
         started = time.perf_counter()
         await self._notify(progress_callback, 0, len(pages), "document.started")
-        worker_slot = await self._available_slots.get()
-        release_slot = True
+        conversion_batches = await self._conversion_batches(source, pages, page_groups)
+        reserved_slots = await self._reserve_converter_slots(
+            max(len(page_groups) for page_groups in conversion_batches)
+        )
+        deferred_release_slots: set[int] = set()
+        announced_pages: set[int] = set()
+        progress_lock = asyncio.Lock()
         parsed_pages: list[PageParseResult] = []
         picture_candidates: list[PictureCandidate] = []
         table_fragments: list[object] = []
         completed_count = 0
         page_backend = self.glm_adapter.name if force_ocr else self.name
         try:
-            for page_group in page_groups:
-                if self._cancelled(cancel_event):
-                    raise ParserCancelledError("job was cancelled")
-                progress_sink: queue.Queue[int] = queue.Queue()
-                announced_pages: set[int] = set()
-                selected_group_pages = set(range(page_group[0], page_group[1] + 1))
-                conversion_task = asyncio.create_task(
-                    asyncio.to_thread(
-                        self._convert_in_slot,
-                        worker_slot,
-                        source,
-                        page_group,
-                        options,
-                        force_ocr,
-                        glm_status.ready,
-                        progress_sink,
-                    )
+            async for page_group, conversion in self._iter_conversions(
+                reserved_slots,
+                conversion_batches,
+                source,
+                options,
+                force_ocr,
+                glm_ready,
+                progress_callback,
+                set(pages),
+                announced_pages,
+                progress_lock,
+                deferred_release_slots,
+                cancel_event,
+            ):
+                (
+                    group_pages,
+                    group_pictures,
+                    group_fragments,
+                    completed_count,
+                ) = await self._export_conversion(
+                    page_group,
+                    conversion,
+                    page_backend=page_backend,
+                    cancel_event=cancel_event,
+                    progress_callback=progress_callback,
+                    completed_count=completed_count,
+                    total_pages=len(pages),
                 )
-                self._inflight_conversions.add(conversion_task)
-                conversion_task.add_done_callback(self._inflight_conversions.discard)
-                progress_task = asyncio.create_task(
-                    self._drain_pipeline_progress(
-                        conversion_task,
-                        progress_sink,
-                        progress_callback,
-                        completed_before_group=completed_count,
-                        total=len(pages),
-                        selected_pages=selected_group_pages,
-                        announced_pages=announced_pages,
-                    )
-                )
-                try:
-                    conversion = await asyncio.shield(conversion_task)
-                except asyncio.CancelledError:
-                    # to_thread cannot be stopped. Keep this converter slot reserved
-                    # until the upstream conversion really exits, preventing unsafe
-                    # reuse after an API timeout or worker cancellation.
-                    release_slot = False
-
-                    def release_when_done(_task: asyncio.Task[object]) -> None:
-                        self._available_slots.put_nowait(worker_slot)
-
-                    conversion_task.add_done_callback(release_when_done)
-                    raise
-                finally:
-                    if conversion_task.done():
-                        await progress_task
-                    else:
-                        # The shielded Docling thread must keep its converter
-                        # slot, but the request-scoped progress forwarder must
-                        # stop immediately so a timed-out/cancelled job cannot
-                        # emit events after its terminal state.
-                        progress_task.cancel()
-                        await asyncio.gather(progress_task, return_exceptions=True)
-
-                status_text = str(getattr(conversion, "status", "success")).lower()
-                if status_text.endswith("failure") or status_text.endswith("skipped"):
-                    messages = self._conversion_error_messages(conversion)
-                    raise ParserError(
-                        "Docling reported conversion failure", details={"errors": messages}
-                    )
-                document = getattr(conversion, "document", None)
-                if document is None:
-                    raise ParserError("Docling returned no document")
-                error_messages = self._conversion_error_messages(conversion)
-                picture_candidates.extend(self._extract_picture_candidates(document, page_group))
-                group_table_fragments = extract_table_fragments(document, page_group)
-                table_fragments.extend(group_table_fragments)
-                overlapping_duplicates = self._overlapping_text_duplicate_counts(
-                    document, page_group
-                )
-
-                for page_number in range(page_group[0], page_group[1] + 1):
-                    if self._cancelled(cancel_event):
-                        raise ParserCancelledError("job was cancelled")
-                    page_started = time.perf_counter()
-                    try:
-                        markdown = await asyncio.to_thread(
-                            export_page_markdown,
-                            document,
-                            page_number,
-                            group_table_fragments,
-                        )
-                        duplicate_counts = overlapping_duplicates.get(page_number, Counter())
-                        markdown = self._remove_overlapping_text_duplicates(
-                            markdown,
-                            duplicate_counts,
-                        )
-                        export_text = getattr(document, "export_to_text", None)
-                        plain_text = (
-                            await asyncio.to_thread(export_text, page_no=page_number)
-                            if export_text
-                            else None
-                        )
-                        page_warnings: list[PipelineWarning] = []
-                        page_status = PageStatus.COMPLETED
-                        if error_messages:
-                            page_status = PageStatus.WARNING
-                            page_warnings.append(
-                                PipelineWarning(
-                                    code="docling_partial_conversion",
-                                    message="Docling reported one or more conversion errors",
-                                    page_number=page_number,
-                                    backend=self.name,
-                                    details={"errors": error_messages[:5]},
-                                )
-                            )
-                        invalid_tables = [
-                            fragment
-                            for fragment in group_table_fragments
-                            if fragment.page_number == page_number and not fragment.valid
-                        ]
-                        if invalid_tables:
-                            page_status = PageStatus.WARNING
-                            page_warnings.append(
-                                PipelineWarning(
-                                    code="table_structure_invalid",
-                                    message="one or more Docling tables contain invalid or overlapping cell spans",
-                                    page_number=page_number,
-                                    backend=self.name,
-                                    details={
-                                        "fragments": [
-                                            {
-                                                "id": fragment.fragment_id,
-                                                "reasons": fragment.invalid_reasons,
-                                            }
-                                            for fragment in invalid_tables
-                                        ]
-                                    },
-                                )
-                            )
-                        if duplicate_counts:
-                            page_warnings.append(
-                                PipelineWarning(
-                                    code="overlapping_ocr_boxes_deduplicated",
-                                    message="identical text from highly overlapping OCR boxes was emitted once",
-                                    severity=WarningSeverity.INFO,
-                                    page_number=page_number,
-                                    backend=self.name,
-                                    details={
-                                        "removed_items": sum(duplicate_counts.values()),
-                                        "minimum_iou": 0.8,
-                                    },
-                                )
-                            )
-                        parsed_pages.append(
-                            PageParseResult(
-                                page_number=page_number,
-                                status=page_status,
-                                backend=page_backend,
-                                content=str(markdown or ""),
-                                plain_text=str(plain_text) if plain_text is not None else None,
-                                duration_ms=max(
-                                    0, round((time.perf_counter() - page_started) * 1000)
-                                ),
-                                warnings=page_warnings,
-                            )
-                        )
-                    except Exception as exc:
-                        parsed_pages.append(
-                            PageParseResult(
-                                page_number=page_number,
-                                status=PageStatus.FAILED,
-                                backend=page_backend,
-                                duration_ms=max(
-                                    0, round((time.perf_counter() - page_started) * 1000)
-                                ),
-                                warnings=[
-                                    PipelineWarning(
-                                        code="page_export_failed",
-                                        message=f"failed to export page: {type(exc).__name__}",
-                                        severity=WarningSeverity.ERROR,
-                                        page_number=page_number,
-                                        backend=self.name,
-                                    )
-                                ],
-                            )
-                        )
-                    completed_count += 1
-                    emitted_status = parsed_pages[-1].status
-                    event_name = {
-                        PageStatus.COMPLETED: "page.completed",
-                        PageStatus.WARNING: "page.warning",
-                        PageStatus.FAILED: "page.failed",
-                    }[emitted_status]
-                    await self._notify(progress_callback, completed_count, len(pages), event_name)
+                parsed_pages.extend(group_pages)
+                picture_candidates.extend(group_pictures)
+                table_fragments.extend(group_fragments)
         except (ParserCancelledError, ParserError):
             raise
         except Exception as exc:
             raise ParserError(f"Docling conversion failed: {type(exc).__name__}: {exc}") from exc
         finally:
-            if release_slot:
-                self._available_slots.put_nowait(worker_slot)
+            self._release_converter_slots(
+                [slot for slot in reserved_slots if slot not in deferred_release_slots]
+            )
 
         warnings: list[PipelineWarning] = []
-        if not glm_status.ready:
+        if not glm_ready and not (
+            source.mime_type == "application/pdf"
+            and options.scan_policy == ScanPolicy.SKIP
+        ):
             warnings.append(
                 PipelineWarning(
                     code="glm_ocr_unavailable",
@@ -794,7 +1059,7 @@ class DoclingStandardParser(DocumentParser):
             pipeline=ParsePipeline(
                 profile=options.profile.value,
                 primary=self.name,
-                ocr=self.glm_adapter.name if glm_status.ready else None,
+                ocr=self.glm_adapter.name if glm_ready else None,
             ),
             route_summary=route_summary,
             warnings=warnings,

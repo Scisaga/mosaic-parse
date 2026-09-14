@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import json
 import math
 import re
@@ -20,6 +21,7 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
+from PIL import Image
 
 from app.models.backend import BackendState, BackendStatus
 from app.models.parse_options import ContentParseOptions
@@ -247,7 +249,12 @@ class GlmSdkRemoteParser(DocumentParser):
     def _cancelled(cancel_event: object | None) -> bool:
         return bool(cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)())
 
-    def _render_page(self, source: StoredSource, page_number: int) -> str:
+    def _render_page(
+        self,
+        source: StoredSource,
+        page_number: int,
+        rotation_degrees: int = 0,
+    ) -> str:
         if source.mime_type != "application/pdf":
             payload = source.path.read_bytes()
             mime_type = source.mime_type if source.mime_type.startswith("image/") else "image/png"
@@ -262,6 +269,12 @@ class GlmSdkRemoteParser(DocumentParser):
                 scale *= math.sqrt(self.max_pixels / pixels)
             pixmap = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False)
             payload = pixmap.tobytes("png")
+        if rotation_degrees in {90, 180, 270}:
+            with Image.open(io.BytesIO(payload)) as source_image:
+                upright = source_image.convert("RGB").rotate(-rotation_degrees, expand=True)
+                buffer = io.BytesIO()
+                upright.save(buffer, format="PNG")
+                payload = buffer.getvalue()
         return f"data:image/png;base64,{base64.b64encode(payload).decode('ascii')}"
 
     @staticmethod
@@ -400,6 +413,34 @@ class GlmSdkRemoteParser(DocumentParser):
             elif native_label == "paragraph_title" and not content.lstrip().startswith("#"):
                 content = f"## {content}"
             output.append(content)
+        obstruction_regions: list[tuple[float, float, float, float]] = []
+        for region in regions:
+            obstruction = (
+                str(region.get("label", "")) == "image"
+                or str(region.get("native_label", ""))
+                in {"seal", "signature", "handwriting", "watermark"}
+            )
+            bbox = region.get("bbox_2d")
+            if not obstruction or not isinstance(bbox, list) or len(bbox) != 4:
+                continue
+            obstruction_regions.append(
+                (
+                    float(bbox[0]) / 1_000,
+                    float(bbox[1]) / 1_000,
+                    float(bbox[2]) / 1_000,
+                    float(bbox[3]) / 1_000,
+                )
+            )
+        for fragment in fragments:
+            left, top, right, bottom = fragment.normalized_bbox
+            fragment.visual_obstructions = [
+                obstruction
+                for obstruction in obstruction_regions
+                if obstruction[0] < right
+                and obstruction[2] > left
+                and obstruction[1] < bottom
+                and obstruction[3] > top
+            ]
         return "\n\n".join(output).strip(), fragments
 
     async def _request_page(
@@ -407,12 +448,18 @@ class GlmSdkRemoteParser(DocumentParser):
         source: StoredSource,
         page_number: int,
         cancel_event: object | None,
+        rotation_degrees: int = 0,
     ) -> tuple[PageParseResult, list[TableFragment], int]:
         started = time.perf_counter()
         if self._cancelled(cancel_event):
             raise ParserCancelledError("job was cancelled")
         try:
-            image_uri = await asyncio.to_thread(self._render_page, source, page_number)
+            image_uri = await asyncio.to_thread(
+                self._render_page,
+                source,
+                page_number,
+                rotation_degrees,
+            )
             payload: dict[str, Any] | None = None
             last_error_code = "glm_sdk_http_error"
             async with self._semaphore:
@@ -509,6 +556,7 @@ class GlmSdkRemoteParser(DocumentParser):
         document_id: str,
         progress_callback: ProgressCallback | None = None,
         cancel_event: object | None = None,
+        rotation_by_page: dict[int, int] | None = None,
     ) -> DocumentParseResult:
         if not self.enabled:
             from app.parsers.base import ParserUnavailableError
@@ -532,7 +580,12 @@ class GlmSdkRemoteParser(DocumentParser):
             page_started = time.perf_counter()
             try:
                 async with asyncio.timeout(self.timeout):
-                    value = await self._request_page(source, page_number, cancel_event)
+                    value = await self._request_page(
+                        source,
+                        page_number,
+                        cancel_event,
+                        (rotation_by_page or {}).get(page_number, 0),
+                    )
             except TimeoutError:
                 value = (
                     PageParseResult(

@@ -7,36 +7,29 @@
 MosaicParse 是一个自托管的多模态内容解析服务，用在 PDF、Office 文档、图片或视频与
 RAG 等下游系统之间。
 
-它解决的问题很直接：不同文件格式需要不同的处理工具，而单纯转成纯文本或 Markdown，
-又会丢掉页码、阅读顺序、表格行列、图片位置和解析来源。MosaicParse 把这些输入整理成
-统一的 `ContentParseResult`，保留页/幻灯片、区域、文本块、表格单元格、媒体文件和视频
-关键帧，同时标出坐标、来源、质量和告警。下游只需对接一种结果格式；解析出问题时，
-也能回到具体页面、区域或单元格检查。
+它解决的问题很直接：不同文件格式需要不同的处理工具，而把详细坐标和解析器内部对象
+直接交给业务 LLM 又慢又难用。MosaicParse 在内部利用版面、坐标和多模型证据完成解析，
+最终只输出一份普通 GFM Markdown：保留标题、段落、列表、表格和页间连续关系，不再把
+表格二次改写为专用 XML 或文档 JSON。图片和视频以标准 Markdown 列表及下载链接保留。
 
-服务会根据文本层、页面布局、OCR 和视觉信号自动选择处理方式。文档内嵌图片会作为
-可下载的媒体文件返回；独立视频通过 FFmpeg 采样关键帧，摘要只基于这些采样内容。
-Markdown / Plain Text 仍可按需生成，但它们只是便于阅读和接入的附加输出。
-
-## 界面预览
-
-![MosaicParse Web UI：原始图文表格 PDF 与结构化解析概览并排预览](docs/assets/web-ui.png)
-
-截图使用仓库内自制的 `tests/fixtures/field-observation-report.pdf`，
-同一页包含嵌入图片与网格表格，不包含第三方文档内容。右侧展示结构化主产物的
-解析概览，而非 Markdown 派生视图。
+服务会根据文本层、页面布局、OCR 和视觉信号自动选择处理方式。文档内嵌图片始终作为
+可下载资产保留，模型描述默认关闭并可通过 `describe_images=true` 按需启用；独立视频
+通过 FFmpeg 采样关键帧，摘要只基于这些采样内容。
+任务状态、错误和无坐标资产清单仍使用 JSON 控制协议；文档内容只有 Markdown。
 
 ## 项目边界
 
-本项目只负责“内容中可见了什么、位于哪里、结构如何、解析结果来自哪个后端”。
-它不负责 Embedding、切块策略、索引、问答、实体关系或领域结论。
+本项目负责恢复“内容中可见了什么、结构如何”；它不负责表格业务语义重写、Embedding、
+索引、问答、实体消歧、领域关系或事件 ontology。
 
 ## 功能
 
 - PDF、DOCX、PPTX、PNG、JPEG、WebP、TIFF、BMP 及 MP4、MOV、MKV、WebM、AVI；
-- 文档内嵌图片提取、去重、描述与下载；独立视频关键帧和仅基于采样帧的摘要；
-- `fast`、`balanced`、`accurate` 三个质量档位，服务自动路由；
-- 版本化解析结果，包含区域、表格、单元格 span、来源追踪与质量原因；
-- 可选 Markdown / Plain Text 派生视图，支持页码范围与结果下载；
+- 文档内嵌图片提取、去重、按需描述与下载；独立视频关键帧和仅基于采样帧的摘要；
+- 单一自动解析策略；可显式跳过扫描 PDF 页并只保留页面图像；
+- 唯一的 GFM Markdown 文档结果；坐标和候选证据只在单次解析内部使用；
+- 表格保留为 GFM，并在导出前合并可确定的跨页连续表；多级/重复表头按识别结果保留，
+  不用固定首行表头或领域规则重新解释单元格；
 - 小文件同步解析，异步 Job、持久化状态和 SSE 进度；
 - `/health`、`/ready`、后端能力探测、Swagger、ReDoc；
 - MCP 2.x Streamable HTTP；
@@ -74,9 +67,9 @@ docker compose ps
 ```bash
 curl --fail-with-body http://localhost:12303/v1/content/parse \
   -F file=@tests/fixtures/native-report.pdf \
-  -F profile=balanced \
+  -F scan_policy=auto \
   -F language=zh,en \
-  -F include_renderings=true
+  -o result.md
 ```
 
 ## 三种部署模式
@@ -84,7 +77,7 @@ curl --fail-with-body http://localhost:12303/v1/content/parse \
 | 模式 | 主服务 | OCR/VLM | 启动方式 |
 |---|---|---|---|
 | CPU-only | 本项目 CPU 镜像 | 关闭；适合数字 PDF/Office | `docker compose up -d --build mosaicparse` |
-| 本机 GLM | CPU 主服务 | profile 中独立 vLLM，默认 GPU 1 | `docker compose --profile glm up -d --build` |
+| 本机 GLM | CPU 主服务 | Compose 可选服务中的独立 vLLM，默认 GPU 1 | `docker compose --profile glm up -d --build` |
 | 完整 GLM SDK | CPU 主服务 + CPU 布局 sidecar | 复用 GPU 1 的 GLM-OCR | `docker compose --profile glm-sdk up -d --build` |
 | 远程后端 | CPU 主服务 | 远程 GLM 和/或既有 VLM | 配置 URL 后只启动 `mosaicparse` |
 
@@ -114,9 +107,9 @@ Compose 将 GPU `device_ids` 默认锁到 `1`。参考主机的 GPU 1 是 RTX 20
 ### GLM SDK＋Qwen 区域视觉融合
 
 `docling-glm-ocr` 插件和官方 `glmocr` SDK 复用同一个 GLM-OCR 识别模型。SDK
-sidecar 在 CPU 上运行 PP-DocLayoutV3，将布局、区域和 OCR 原值用于来源追踪；Qwen
-负责区域语义、表格拓扑、行列归属、可见值读取和冲突裁决。结果按区域和单元格组装，
-不会用 table-only 候选覆盖整页正文、图片占位或跨页表元数据。
+sidecar 在 CPU 上运行 PP-DocLayoutV3；页面先按检测方向旋正，再生成表格候选。确定性
+质量门控会直接接受干净表格，只把少量冲突行交给 Qwen；多级表头或全局拓扑失败才执行
+全表视觉兜底。
 
 ```dotenv
 GLM_SDK_ENABLED=1
@@ -130,10 +123,10 @@ docker compose --profile glm-sdk up -d --build
 curl --fail http://localhost:12303/v1/backends
 ```
 
-`accurate` 自动对测得的复杂扫描/混合表、横置表及签章页执行视觉融合；原生和
-稀疏页继续由 Docling 处理。每页最多 3 次 Qwen 调用、累计最多 180 秒；区域读取
-最多 16K 输出 token。`fast/balanced` 不调用 Qwen，`VISUAL_ROUTER_ENABLED=0`
-可整体停用视觉路由。请求端不再暴露后端模式或 VLM policy。
+默认 `scan_policy=auto` 自动处理复杂扫描/混合表、横置表及签章页；数字原生 PDF
+继续使用 Docling 原生文本和 TableFormer，不做无条件 GLM-OCR。局部复核最多一次
+Qwen，完整兜底仍受每页 3 次、180 秒预算限制。`scan_policy=skip` 会关闭 PDF 扫描
+OCR/视觉增强，将检测到的扫描页保存为整页资产并在 Markdown 中明确标记跳过。
 
 ### 远程 GLM / Ollama
 
@@ -169,8 +162,7 @@ curl --fail http://localhost:12303/v1/backends
 | `POST` | `/v1/content/jobs` | 创建异步任务 |
 | `GET` | `/v1/content/jobs/{job_id}` | 查询持久化状态 |
 | `GET` | `/v1/content/jobs/{job_id}/events` | SSE 进度 |
-| `GET` | `/v1/content/jobs/{job_id}/result` | 获取/下载 ContentParseResult JSON |
-| `GET` | `/v1/content/jobs/{job_id}/rendering/{format}` | 获取派生 Markdown 或 Text |
+| `GET` | `/v1/content/jobs/{job_id}/result` | 获取/下载 GFM Markdown |
 | `GET` | `/v1/content/jobs/{job_id}/assets` | 列出图片、视频与关键帧资产 |
 | `GET` | `/v1/content/jobs/{job_id}/assets/{asset_id}` | 鉴权下载资产；视频支持 Range |
 | `GET` | `/v1/content/jobs/{job_id}/bundle` | 按需生成 manifest 与资产 ZIP |
@@ -200,8 +192,8 @@ X-Admin-Token: <ADMIN_TOKEN>
 
 ## MCP
 
-MCP 使用 Python SDK 2.x 的 Streamable HTTP 传输，暴露解析、任务状态、解析结果
-和派生渲染工具。大文件使用受控 `source_url`；MCP 不接受任意本地文件路径。
+MCP 使用 Python SDK 2.x 的 Streamable HTTP 传输，暴露解析、任务状态、Markdown
+结果和资产工具。大文件使用受控 `source_url`；MCP 不接受任意本地文件路径。
 
 MCP v2 会校验 Host 和 Origin 防止 DNS rebinding。通过公网域名/反向代理
 暴露时，必须把精确 `host[:port]` 和 Origin 添加到：
@@ -242,6 +234,13 @@ DATA_DIR=./data STATIC_DIR=frontend/dist GLM_OCR_ENABLED=0 \
 CPU 基线使用 `DOCLING_COMPILE_MODELS=0`，避免首次文档触发耗时很长的
 `torch.compile`；只应在固定硬件上完成预热与基准验证后开启。远程 VLM
 默认 `VLM_MAX_RETRIES=1`，防止超时/过载时形成长时间重试风暴。
+
+原生文本 PDF 可通过 `DOCLING_PAGE_WORKERS` 做单文档页级并行。每个 worker
+持有一个启动期加载、请求间复用的 Docling 转换器，单转换器线程数由
+`DOCLING_NUM_THREADS` 控制。服务只对连续、达到
+`DOCLING_PAGE_PARALLEL_MIN_PAGES` 且每页原生文本充足的 PDF 分片；扫描、混合、
+稀疏选页和短文档自动走单转换器路径。缓存转换器总数为
+`PARSER_WORKERS * DOCLING_PAGE_WORKERS`，配置上限为 32；调大前须同时核算 CPU 和内存。
 
 ## 验证
 

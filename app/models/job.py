@@ -87,8 +87,6 @@ class JobRecord(BaseModel):
     completed_at: datetime | None = None
     expires_at: datetime | None = None
     result_path: str | None = None
-    result_markdown_path: str | None = None
-    result_text_path: str | None = None
     error: JobError | None = None
     attempt: int = Field(default=1, ge=1)
     parent_job_id: str | None = None

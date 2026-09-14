@@ -16,6 +16,7 @@ from app.models import (
     PageSourceKind,
     ParsePipeline,
     ParseProfile,
+    ScanPolicy,
     SelectionStrategy,
     StoredSource,
     VlmPolicy,
@@ -44,14 +45,16 @@ def _result(page: PageParseResult) -> DocumentParseResult:
     )
 
 
-def test_visual_policy_is_derived_only_from_profile() -> None:
+def test_visual_policy_is_derived_only_from_scan_policy() -> None:
+    assert ContentParseOptions().resolved_vlm_policy == VlmPolicy.AUTO_VISUAL
     assert (
-        ContentParseOptions(profile=ParseProfile.ACCURATE).resolved_vlm_policy
-        == VlmPolicy.AUTO_VISUAL
+        ContentParseOptions(scan_policy=ScanPolicy.SKIP).resolved_vlm_policy
+        == VlmPolicy.OFF
     )
-    assert ContentParseOptions(profile=ParseProfile.BALANCED).resolved_vlm_policy == VlmPolicy.OFF
+    assert ContentParseOptions(profile=ParseProfile.ACCURATE).scan_policy == ScanPolicy.AUTO
+    assert ContentParseOptions(profile=ParseProfile.BALANCED).scan_policy == ScanPolicy.SKIP
     with pytest.raises(ValidationError):
-        ContentParseOptions.model_validate({"profile": "accurate", "vlm_policy": "off"})
+        ContentParseOptions.model_validate({"scan_policy": "auto", "vlm_policy": "off"})
 
 
 def test_sparse_evidence_is_measured_and_not_guessed(tmp_path: Path) -> None:

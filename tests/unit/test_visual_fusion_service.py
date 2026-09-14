@@ -92,6 +92,29 @@ def _fragment(value: str = "100") -> TableFragment:
     )
 
 
+def _financial_fragment(
+    rows: list[list[str]],
+    *,
+    fragment_id: str = "sdk_p1_t1",
+    obstructions: list[tuple[float, float, float, float]] | None = None,
+) -> TableFragment:
+    markdown = render_gfm_rows(rows)
+    return TableFragment(
+        fragment_id=fragment_id,
+        page_number=1,
+        ordinal=1,
+        normalized_bbox=(0.05, 0.2, 0.95, 0.8),
+        num_rows=len(rows),
+        num_cols=len(rows[0]),
+        rows=rows,
+        column_boundaries=None,
+        markdown=markdown,
+        rendered=f"<!-- table-fragment: {fragment_id} -->\n\n{markdown}",
+        has_column_header=True,
+        visual_obstructions=obstructions or [],
+    )
+
+
 def _page(fragment: TableFragment) -> PageParseResult:
     return PageParseResult(
         page_number=1,
@@ -131,6 +154,144 @@ def test_parallel_band_schema_requires_exact_left_and_right_pair() -> None:
         }
     )
     assert [item.table_id for item in parsed.tables] == ["left", "right"]
+
+
+def test_glm_gate_accepts_clean_parallel_financial_table_without_qwen() -> None:
+    rows = [
+        ["项目", "附注", "2023年末", "2022年末", "项目", "附注", "2023年末", "2022年末"],
+        ["资产：", "", "", "", "负债：", "", "", ""],
+        ["货币资金", "五、（一）", "100", "90", "短期借款", "五、（二）", "50", "40"],
+        ["资产总计", "", "100", "90", "负债和股东权益总计", "", "100", "90"],
+    ]
+    qwen = _Qwen(VisualBandExtraction())
+    service = VisualFusionService(SimpleNamespace(), qwen)
+
+    assessment = service.assess_glm_table_candidate([_financial_fragment(rows)])
+
+    assert assessment.route == "accept"
+    assert len(assessment.fragments) == 2
+    assert assessment.issues == []
+
+
+def test_glm_gate_localizes_shifted_amount_and_note_row() -> None:
+    rows = [
+        ["项目", "附注", "2023年末", "2022年末"],
+        ["货币资金", "五、（一）", "100", "90"],
+        ["短期借款", "296,155,561.32", "五、（二）", "323,988,595.63"],
+        ["应付账款", "五、（三）", "80", "70"],
+    ]
+    service = VisualFusionService(SimpleNamespace(), _Qwen(VisualBandExtraction()))
+
+    assessment = service.assess_glm_table_candidate([_financial_fragment(rows)])
+
+    assert assessment.route == "targeted"
+    assert [(item.row_label, item.column_indices) for item in assessment.issues] == [
+        ("短期借款", (1, 2, 3))
+    ]
+
+
+def test_glm_gate_uses_subtotal_and_obstruction_to_localize_one_digit_error() -> None:
+    rows = [
+        ["项目", "附注", "2023年末", "2022年末"],
+        ["资产：", "", "", ""],
+        ["货币资金", "五、（一）", "100", "90"],
+        ["应收账款", "五、（二）", "100", "80"],
+        ["资产合计", "", "300", "170"],
+    ]
+    service = VisualFusionService(SimpleNamespace(), _Qwen(VisualBandExtraction()))
+
+    assessment = service.assess_glm_table_candidate(
+        [_financial_fragment(rows, obstructions=[(0.1, 0.44, 0.3, 0.56)])]
+    )
+
+    assert assessment.route == "targeted"
+    assert any(
+        item.code == "subtotal_single_digit_conflict"
+        and item.row_label == "货币资金"
+        and item.column_indices == (2,)
+        and item.alternate_values == ((2, "200"),)
+        for item in assessment.issues
+    )
+
+
+async def test_glm_direct_route_makes_no_qwen_call() -> None:
+    rows = [
+        ["项目", "附注", "2023年末", "2022年末"],
+        ["货币资金", "五、（一）", "100", "90"],
+        ["应收账款", "五、（二）", "80", "70"],
+        ["资产总计", "", "180", "160"],
+    ]
+    fragment = _financial_fragment(rows)
+    qwen = _Qwen(VisualBandExtraction())
+    service = VisualFusionService(SimpleNamespace(), qwen)
+
+    outcome = await service.fuse_table_page(
+        SimpleNamespace(),
+        ContentParseOptions(profile="accurate"),
+        _page(fragment),
+        _evidence(rows=10, columns=5),
+        _page(fragment),
+        [fragment],
+        [],
+    )
+
+    assert qwen.calls == []
+    assert outcome.page.backend == "glm-table"
+    assert outcome.page.diagnostics is not None
+    assert outcome.page.diagnostics.selected_strategy == SelectionStrategy.GLM_TABLE
+    assert outcome.page.diagnostics.visual_fusion is not None
+    assert outcome.page.diagnostics.visual_fusion.qwen_calls == 0
+
+
+async def test_glm_targeted_route_uses_one_row_crop_call_and_repairs_columns() -> None:
+    rows = [
+        ["项目", "附注", "2023年末", "2022年末"],
+        ["货币资金", "五、（一）", "100", "90"],
+        ["短期借款", "296,155,561.32", "五、（二）", "323,988,595.63"],
+        ["应付账款", "五、（三）", "80", "70"],
+    ]
+    fragment = _financial_fragment(rows)
+    qwen = _Qwen(
+        VisualBandExtraction(),
+        VisualConflictBatch(
+            resolutions=[
+                VisualConflictResolution(
+                    conflict_id="t0r1c1", observed_value="五、（二）"
+                ),
+                VisualConflictResolution(
+                    conflict_id="t0r1c2", observed_value="296,155,561.32"
+                ),
+                VisualConflictResolution(
+                    conflict_id="t0r1c3", observed_value="323,988,595.63"
+                ),
+            ]
+        ),
+    )
+    service = VisualFusionService(SimpleNamespace(), qwen)
+
+    outcome = await service.fuse_table_page(
+        SimpleNamespace(),
+        ContentParseOptions(profile="accurate"),
+        _page(fragment),
+        _evidence(rows=10, columns=5),
+        _page(fragment),
+        [fragment],
+        [],
+    )
+
+    assert qwen.calls == [VisualConflictBatch]
+    assert outcome.fragments[0].rows[2] == [
+        "短期借款",
+        "五、（二）",
+        "296,155,561.32",
+        "323,988,595.63",
+    ]
+    assert outcome.page.diagnostics is not None
+    assert outcome.page.diagnostics.selected_strategy == SelectionStrategy.GLM_QWEN_TARGETED
+    assert outcome.page.diagnostics.visual_fusion is not None
+    assert outcome.page.diagnostics.visual_fusion.qwen_calls == 1
+    assert outcome.page.diagnostics.visual_fusion.unresolved_conflicts == 0
+    assert qwen.reasoning_efforts == ["none"]
 
 
 async def test_region_fusion_preserves_non_table_content_and_resolves_cells() -> None:

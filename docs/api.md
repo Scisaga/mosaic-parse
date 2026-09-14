@@ -1,8 +1,11 @@
 # MosaicParse HTTP 与 MCP 契约
 
-默认 Base URL 为 `http://localhost:12303`。在线定义以 `/openapi.json`、`/docs`
-和 `/redoc` 为准。MosaicParse 只产出可追溯解析结果和派生渲染，不执行
-Embedding、切块、索引、问答或领域实体抽取。
+默认 Base URL 为 `http://localhost:12303`，在线定义以 `/openapi.json`、`/docs`
+和 `/redoc` 为准。
+
+MosaicParse 的文档结果只有一种：普通 GFM Markdown。任务状态、错误和资产清单仍使用
+JSON 作为控制协议，但它们不是第二份文档解析结果。详细坐标、候选文本和单元格证据只在
+请求内部使用，不通过结果 API 返回；资产清单也不包含页位置或 bbox。
 
 ## 认证
 
@@ -12,161 +15,132 @@ Embedding、切块、索引、问答或领域实体抽取。
 Authorization: Bearer <API_KEY>
 ```
 
-也可使用 `X-API-Key`。管理端点只接受独立的 `X-Admin-Token`。资产 URL 与
-bundle 不会绕过 API Key。
+也可使用 `X-API-Key`。管理端点只接受独立的 `X-Admin-Token`。资产 URL 与 bundle
+不会绕过 API Key。
 
 ## 输入与参数
 
-`POST /v1/content/parse` 和 `POST /v1/content/jobs` 使用
-`multipart/form-data`。`file` 与 `source_url` 必须且只能提供一个。
+`POST /v1/content/parse` 和 `POST /v1/content/jobs` 使用 `multipart/form-data`；
+`file` 与 `source_url` 必须且只能提供一个。
 
 | 字段 | 值 | 默认值 |
 |---|---|---|
-| `file` | PDF、DOCX、PPTX、PNG、JPEG、WebP、TIFF、BMP、MP4、MOV、MKV、WebM、AVI | — |
+| `file` | PDF、DOCX、PPTX、常见图片及视频 | — |
 | `source_url` | 通过 SSRF 校验的 HTTP(S) URL | — |
-| `profile` | `fast\|balanced\|accurate` | `balanced` |
+| `scan_policy` | `auto\|skip` | `auto` |
 | `unit_range` | 一基页/幻灯片范围，如 `1-5,8` | 全部 |
 | `language` | OCR 语言，逗号分隔 | `zh,en` |
+| `describe_images` | 是否为嵌入图片生成模型描述；资产始终保留 | `false` |
 | `description_language` | `zh-CN\|en\|auto` | `zh-CN` |
-| `include_renderings` | 是否返回 Markdown/Text 投影视图 | `true` |
 | `timeout_seconds` | `1..86400` | 服务默认值 |
 | `prefer_async` | 仅 `/parse`；强制返回持久 Job | `false` |
 
-`unit_range` 的语义由真实格式决定：PDF/TIFF 是页，PPTX 是幻灯片；DOCX 和
-单帧图片只接受省略或 `1`；视频不接受范围。服务以 magic、OOXML 内容类型及
-FFprobe 结果为准，不信任上传的 Content-Type。
+`scan_policy=auto` 按页面自动处理扫描件；`skip` 不执行 PDF 扫描 OCR/表格抽取，保留
+整页图像资产并输出明确的跳过状态。旧 `profile`、`mode`、`output_format`、`vlm_policy`、
+`enable_vlm_fallback`、`preserve_page_breaks`、`include_pages`、
+`include_diagnostics` 和 `include_renderings` 均返回 422。
 
-`profile` 是唯一请求级质量控制。模型、后端 URL 与 prompt 均不能由请求指定。
-旧 `mode`、`output_format`、`vlm_policy`、`enable_vlm_fallback`、
-`preserve_page_breaks`、`include_pages`、`include_diagnostics` 会返回 422。
-
-## 同步与自动异步
+## 同步与异步
 
 ```bash
 curl --fail-with-body http://localhost:12303/v1/content/parse \
   -H "Authorization: Bearer $API_KEY" \
-  -F file=@photo.webp \
-  -F profile=balanced \
-  -F description_language=zh-CN
+  -F file=@report.pdf \
+  -F scan_policy=auto
 ```
 
-小型 PDF、图片、DOCX 和 PPTX 返回 HTTP 200 `ContentParseResult`，同时仍创建
-保留 24 小时的持久 Job。独立视频、`prefer_async=true`、超过同步字节或单元限制
-的输入返回 HTTP 202 `JobResponse`。因此调用方必须同时处理 200 与 202。
+小输入成功时返回 HTTP 200：
 
-`POST /v1/content/jobs` 始终返回 202。视频只分析采样帧，不提取音轨，也不做
-ASR。文档内嵌视频完全忽略；文档内嵌图片会成为资产。
-
-## ContentParseResult 1.0
-
-主结果的固定标识是：
-
-```json
-{
-  "object": "content.parse_result",
-  "schema_version": "content-parse-result/1.0",
-  "status": "completed",
-  "source": {
-    "content_id": "job_...",
-    "source_sha256": "...",
-    "filename": "slides.pptx",
-    "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    "kind": "pptx",
-    "size_bytes": 12345,
-    "unit_count": 3,
-    "page_count": null,
-    "slide_count": 3,
-    "duration_ms": null,
-    "width": null,
-    "height": null
-  },
-  "units": [],
-  "assets": [],
-  "tables": [],
-  "logical_tables": [],
-  "visual_analysis": null,
-  "video_analysis": null,
-  "renderings": {"markdown": "...", "plain_text": "..."},
-  "diagnostics": {},
-  "warnings": [],
-  "runtime": {},
-  "links": {},
-  "created_at": "2026-08-19T00:00:00Z"
-}
+```http
+Content-Type: text/markdown; charset=utf-8
+X-Content-ID: job_...
+Location: /v1/content/jobs/job_.../result
 ```
 
-`units[].unit_type` 是 `page`、`slide`、`document_body`、`image` 或 `video`。
-每个单元可含 regions、blocks、tables 引用、asset 引用、渲染与实测诊断。表格
-单元格保留 row/column、span、bbox、所选文本、来源追踪和 reason code。
+响应体就是完整 GFM Markdown。视频、`prefer_async=true` 或超过同步限制的输入
+返回 HTTP 202 `JobResponse`。`POST /v1/content/jobs` 始终返回 202；调用方轮询任务
+到 `completed` 或 `partial` 后读取：
 
-独立图片的结构化说明位于顶层 `visual_analysis`，并同时附在源图片资产上；文档
-图片说明位于对应 `assets[].visual_analysis`。重复图片以 SHA256 去重，多个出现位置
-记录在 `locations[]`。`mixed` 图片同时保留文档结构与视觉描述。
+```http
+GET /v1/content/jobs/{id}/result
+Accept: text/markdown
+```
 
-`video_analysis` 包含实测时长/尺寸/编码、场景区间和单调关键帧时间戳。摘要只能
-声称采样帧可见的内容；`visual_only=true` 明确表示没有分析音频。
+`?download=true` 增加 `.md` 的 `Content-Disposition`。旧
+`/rendering/{markdown|text}` 已移除。
 
-`include_renderings=false` 只清空顶层和单元级 Markdown/Text，解析结构、图片描述、
-关键帧、诊断和告警仍保留。未知测量使用 `null`，不能以零冒充测量值。
+跳过的扫描 PDF 页不会输出失去行列归属的 OCR 数字，而是输出：
 
-## Job、SSE 与结果
+```markdown
+> 扫描页未处理（scan_policy=skip）：第 8 页，页面类型为 scanned。
+```
+
+对应整页图像可在结果末尾的“图片资产”列表或资产接口中取得。
+
+## GFM Markdown 输出
+
+输出忠实保留解析器恢复出的标题、段落、列表和表格，不再按财务、股东或键值等领域类型
+二次改写。可确定属于同一逻辑表的跨页片段会先合并；续页重复表头会去重，但同一张表中
+真正的多级表头或分段表头会原样保留。下游 LLM 因而可以结合上下文理解表头，而不是依赖
+转换器把第一行硬套到所有数据行。
+
+```markdown
+## 截至报告期末的财务指标
+
+单位：万元
+
+| 项目 | 本报告期末 | 上年末 | 本报告期末比上年末增减 |
+| --- | ---: | ---: | ---: |
+| 流动比率 | 1.75 | 1.95 | -10.26% |
+| 资产负债率 | 63.86% | 63.82% | 0.04% |
+|  | 本报告期 | 上年同期 | 本报告期比上年同期增减 |
+| 扣除非经常性损益后净利润 | 69,780.34 | 59,811.73 | 16.67% |
+```
+
+图片、图表、签章裁剪和视频关键帧始终保留为鉴权资产。`describe_images=true` 时，
+嵌入图片的描述和可见文字使用普通 Markdown 列表追加：
+
+```markdown
+## 图片资产
+
+- **figure-1.png**（embedded_image，第 3 页，资产 ID：`asset_...`）：[下载](/v1/content/jobs/.../assets/asset_...)
+  - 描述：图片中可见的内容说明
+  - 可见文字：图片内可见文字
+```
+
+## Job、SSE、资产与 bundle
 
 ```text
 POST   /v1/content/jobs
 GET    /v1/content/jobs/{id}
 GET    /v1/content/jobs/{id}/events
 GET    /v1/content/jobs/{id}/result
-GET    /v1/content/jobs/{id}/rendering/{markdown|text}
+GET    /v1/content/jobs/{id}/assets
+GET    /v1/content/jobs/{id}/assets/{asset_id}
+GET    /v1/content/jobs/{id}/bundle
 POST   /v1/content/jobs/{id}/retry
 DELETE /v1/content/jobs/{id}
 ```
 
-状态流转：
-
-```text
-queued -> running -> completed
-                  -> partial
-                  -> failed
-queued/running    -> cancelled
-```
-
-SSE 进度单位可能为 `page`、`slide`、`asset` 或 `frame`。SSE 是增量体验层；断线后
-应重新读取 Job 状态。`partial` 表示父内容可用但至少一项非致命媒体处理失败，例如
-文档图片的 VLM 不可用。纯视觉独立图片/视频缺少 VLM 时整个任务失败。
-
-0.4.0 升级会按受保护清理流程删除旧 Job；若意外恢复旧结果文件，读取时返回 409
-`legacy_result_contract`，不会静默转换。
-
-## 资产与 bundle
-
-```text
-GET /v1/content/jobs/{id}/assets
-GET /v1/content/jobs/{id}/assets/{asset_id}
-GET /v1/content/jobs/{id}/bundle
-```
-
-资产元数据含 MIME、SHA256、字节数、宽高/时长、角色、父资产、出现位置、状态和
-鉴权下载 URL。独立图片返回原始字节；DOCX/PPTX 返回原始嵌入图片；PDF 只返回
-Docling 语义图片区域的页面裁剪；视频返回原视频和派生关键帧。
-
-视频下载支持单个 HTTP byte range，并返回 `206`、`Content-Range` 和 SHA256
-ETag。bundle 按需原子生成并缓存，包含 `manifest.json` 和所有可用资产；生成时会
-重新核对每项 SHA256。
+SSE 是增量体验层，断线后以 Job JSON 为准。资产元数据含 MIME、SHA256、尺寸、角色、
+状态和下载 URL，不含页位置或 bbox；视频支持单个 HTTP byte range。bundle 包含内部
+`manifest.json` 与资产文件，不包含另一份详细解析结果。
 
 ## MCP
 
-`GET/POST /mcp` 暴露且只暴露：
+`GET/POST /mcp` 暴露：
 
 - `parse_content`
 - `get_content_job`
 - `get_content_result`
-- `get_content_rendering`
 - `get_content_assets`
 
-资源协议为 `mosaicparse://health`、`mosaicparse://backends`、
-`mosaicparse://usage`。大结果返回 HTTP URL；图片、视频和关键帧不内联 Base64。
+小结果在 MCP JSON 信封的 `content` 字段内携带 `text/markdown`；超过 MCP 字符限制
+时返回同一个 HTTP 结果 URL。不存在单独的 rendering 工具。
 
 ## 错误协议
+
+错误与任务控制仍使用 JSON：
 
 ```json
 {
@@ -179,6 +153,6 @@ ETag。bundle 按需原子生成并缓存，包含 `manifest.json` 和所有可�
 }
 ```
 
-常见状态：400（输入冲突/范围/URL）、401（认证）、404（Job/资产）、409（状态或
-旧契约）、413（大小）、415（真实格式）、422（参数）、429（容量）、502（解析或
-必需模型后端）、504（超时）。旧 `/v1/documents/*` 不注册并返回 404。
+常见状态：400（输入冲突/范围/URL）、401（认证）、404（Job/资产）、409（状态或旧
+契约）、413（大小）、415（真实格式）、422（参数）、429（容量）、502（解析后端）、
+504（超时）。

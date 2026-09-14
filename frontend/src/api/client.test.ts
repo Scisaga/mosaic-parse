@@ -8,13 +8,15 @@ describe('API request helpers', () => {
     const file = new File(['pdf'], '报告.pdf', { type: 'application/pdf' })
     const form = buildParseForm(
       { kind: 'file', file, url: '' },
-      { ...DEFAULT_OPTIONS, profile: 'accurate', unitRange: '2-4' },
+      { ...DEFAULT_OPTIONS, scanPolicy: 'skip', unitRange: '2-4' },
     )
     expect(form.get('file')).toBeInstanceOf(File)
     expect((form.get('file') as File).name).toBe('报告.pdf')
-    expect(form.get('profile')).toBe('accurate')
+    expect(form.get('scan_policy')).toBe('skip')
+    expect(form.get('profile')).toBeNull()
     expect(form.get('unit_range')).toBe('2-4')
-    expect(form.get('include_renderings')).toBe('true')
+    expect(form.get('describe_images')).toBe('false')
+    expect(form.get('include_renderings')).toBeNull()
     expect(form.get('mode')).toBeNull()
     expect(form.get('vlm_policy')).toBeNull()
   })

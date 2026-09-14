@@ -165,7 +165,7 @@ async def test_embedded_video_relationship_is_never_processed_as_video(
             size_bytes=path.stat().st_size,
             page_count=1,
         ),
-        ContentParseOptions(),
+        ContentParseOptions(describe_images=True),
         content_id="job_embedded_video",
         progress_callback=None,
         cancel_event=None,
@@ -215,7 +215,7 @@ async def test_office_duplicate_images_are_analyzed_once(tmp_path: Path) -> None
     )
     result = await multimodal.parse_office(
         source,
-        ContentParseOptions(),
+        ContentParseOptions(describe_images=True),
         content_id="job_docx_image",
         progress_callback=None,
         cancel_event=None,
@@ -246,7 +246,7 @@ async def test_office_document_image_uses_child_document_path_without_vlm(
             size_bytes=path.stat().st_size,
             page_count=1,
         ),
-        ContentParseOptions(),
+        ContentParseOptions(describe_images=True),
         content_id="job_document_image",
         progress_callback=None,
         cancel_event=None,
@@ -279,7 +279,7 @@ async def test_embedded_image_vlm_failure_returns_partial_with_original_asset(
             size_bytes=path.stat().st_size,
             page_count=1,
         ),
-        ContentParseOptions(),
+        ContentParseOptions(describe_images=True),
         content_id="job_partial_docx",
         progress_callback=None,
         cancel_event=None,
@@ -296,6 +296,38 @@ async def test_embedded_image_vlm_failure_returns_partial_with_original_asset(
     assert [warning.code for warning in parse_result.warnings] == [
         "embedded_image_analysis_failed"
     ]
+
+
+async def test_embedded_images_are_preserved_without_description_by_default(
+    tmp_path: Path,
+) -> None:
+    multimodal = service(tmp_path)
+    describe = AsyncMock(side_effect=AssertionError("description must be opt-in"))
+    multimodal._describe = describe  # type: ignore[method-assign]
+    path = Path("tests/fixtures/embedded-image.docx").resolve()
+
+    result = await multimodal.parse_office(
+        StoredSource(
+            path=path,
+            filename=path.name,
+            mime_type=DOCX_MIME,
+            size_bytes=path.stat().st_size,
+            page_count=1,
+        ),
+        ContentParseOptions(),
+        content_id="job_asset_only_docx",
+        progress_callback=None,
+        cancel_event=None,
+    )
+
+    assert result.parse_result is not None
+    assert len(result.parse_result.assets) == 1
+    assert result.parse_result.assets[0].visual_analysis is None
+    assert describe.await_count == 0
+    assert "## 图片资产" in result.markdown
+    assert "资产 ID：`asset_" in result.markdown
+    assert "[下载](/v1/content/jobs/" in result.markdown
+    assert "<asset" not in result.markdown
 
 
 async def test_standalone_video_requires_vlm_before_ffmpeg(tmp_path: Path) -> None:

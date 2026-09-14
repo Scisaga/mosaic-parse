@@ -43,6 +43,14 @@ def test_sync_limits_cannot_exceed_global_limits() -> None:
         make_settings(max_content_units=2, sync_max_units=3)
 
 
+def test_docling_cached_converter_pool_is_bounded() -> None:
+    settings = make_settings(parser_workers=4, docling_page_workers=8)
+    assert settings.parser_workers * settings.docling_page_workers == 32
+
+    with pytest.raises(ValidationError, match="cached converters"):
+        make_settings(parser_workers=5, docling_page_workers=8)
+
+
 def test_mcp_host_allowlist_adds_port_patterns() -> None:
     settings = make_settings(mcp_allowed_hosts="localhost,parser:12303")
     assert settings.mcp_allowed_host_list == ["localhost", "localhost:*", "parser:12303"]

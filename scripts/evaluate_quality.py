@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -78,6 +79,16 @@ def _check_scope(label: str, content: str, expected: dict[str, Any]) -> list[str
     return failures
 
 
+def _pages(markdown: str) -> dict[int, str]:
+    matches = list(re.finditer(r"<!-- page: (?P<page>\d+) -->", markdown))
+    return {
+        int(match.group("page")): markdown[
+            match.end() : (matches[index + 1].start() if index + 1 < len(matches) else len(markdown))
+        ].strip()
+        for index, match in enumerate(matches)
+    }
+
+
 def evaluate_case(client: httpx.Client, root: Path, case: dict[str, Any]) -> dict[str, Any]:
     source = (root / case["file"]).resolve()
     failures: list[str] = []
@@ -87,10 +98,12 @@ def evaluate_case(client: httpx.Client, root: Path, case: dict[str, Any]) -> dic
     if actual_sha != case["sha256"]:
         return {"id": case["id"], "passed": False, "failures": ["SHA-256 mismatch"]}
     form = {
-        "profile": case.get("profile", "balanced"),
-        "unit_range": case.get("unit_range", ""),
+        "scan_policy": case.get(
+            "scan_policy",
+            "auto" if case.get("profile") == "accurate" else "skip" if "profile" in case else "auto",
+        ),
+        "unit_range": case.get("unit_range", case.get("page_range", "")),
         "language": case.get("language", "zh,en"),
-        "include_renderings": "true",
     }
     started = time.perf_counter()
     with source.open("rb") as handle:
@@ -107,60 +120,35 @@ def evaluate_case(client: httpx.Client, root: Path, case: dict[str, Any]) -> dic
             "elapsed_ms": elapsed_ms,
             "failures": [f"HTTP {response.status_code}"],
         }
-    payload = response.json()
+    markdown = response.text
     if elapsed_ms > int(case.get("max_duration_ms", 120_000)):
         failures.append("case exceeded max_duration_ms")
     failures.extend(
         _check_scope(
             "document",
-            str((payload.get("renderings") or {}).get("markdown", "")),
+            markdown,
             case.get("document", {}),
         )
     )
-    pages = {int(page["page_number"]): page for page in payload.get("pages", [])}
+    pages = _pages(markdown)
     for expected in case.get("pages", []):
         page_number = int(expected["page_number"])
-        page = pages.get(page_number)
-        if page is None:
+        page_markdown = pages.get(page_number)
+        if page_markdown is None:
             failures.append(f"page {page_number}: missing page result")
             continue
         failures.extend(
             _check_scope(
                 f"page {page_number}",
-                str((page.get("renderings") or {}).get("markdown", "")),
+                page_markdown,
                 expected,
             )
         )
-        diagnostics = page.get("diagnostics") or {}
-        warning_codes = set(diagnostics.get("warning_codes", []))
-        allowed = set(expected.get("allowed_warnings", []))
-        unexpected = warning_codes - allowed
-        if unexpected:
-            failures.append(f"page {page_number}: unexpected warnings {sorted(unexpected)}")
-        required = set(expected.get("required_warnings", []))
-        if not required <= warning_codes:
-            failures.append(
-                f"page {page_number}: missing warnings {sorted(required - warning_codes)}"
-            )
-        for key in ("source_kind", "quality_verdict", "selected_strategy"):
-            if key in expected and diagnostics.get(key) != expected[key]:
-                failures.append(f"page {page_number}: {key} mismatch")
-    summary = payload.get("diagnostics") or {}
     return {
         "id": case["id"],
         "passed": not failures,
         "elapsed_ms": elapsed_ms,
-        "quality_counts": {
-            key: summary.get(key)
-            for key in (
-                "trusted_pages",
-                "degraded_pages",
-                "untrusted_pages",
-                "visual_pages",
-                "unresolved_visual_conflicts",
-            )
-        }
-        | {"qwen_calls": (payload.get("runtime") or {}).get("qwen_calls")},
+        "scan_pages_skipped": markdown.count("扫描页未处理（scan_policy=skip）"),
         "failures": failures,
     }
 
@@ -179,8 +167,8 @@ def main() -> int:
     )
     args = parser.parse_args()
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
-    if manifest.get("version") != 2 or not isinstance(manifest.get("cases"), list):
-        raise SystemExit("manifest must have version=2 and a cases list")
+    if manifest.get("version") not in {2, 3} or not isinstance(manifest.get("cases"), list):
+        raise SystemExit("manifest must have version=2 or version=3 and a cases list")
     cases = manifest["cases"]
     if args.case_ids:
         requested = set(args.case_ids)

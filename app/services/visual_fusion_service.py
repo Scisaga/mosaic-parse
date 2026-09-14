@@ -14,9 +14,10 @@ import math
 import re
 import time
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from decimal import Decimal, InvalidOperation
 from difflib import SequenceMatcher
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -30,6 +31,7 @@ from app.models.parse_result import (
     QualityVerdict,
     SelectionStrategy,
     VisualFusionDiagnostics,
+    WarningSeverity,
 )
 from app.models.source import StoredSource
 from app.parsers.base import ParserError
@@ -180,6 +182,28 @@ class CellConflict:
     docling_value: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class GlmTableIssue:
+    """A locally addressable GLM table-cell conflict."""
+
+    code: str
+    table_index: int
+    row_index: int
+    column_indices: tuple[int, ...]
+    row_label: str
+    alternate_values: tuple[tuple[int, str], ...] = ()
+
+
+@dataclass(slots=True)
+class GlmTableAssessment:
+    """Deterministic routing result for an oriented GLM table candidate."""
+
+    route: Literal["accept", "targeted", "full"]
+    fragments: list[TableFragment] = field(default_factory=list)
+    issues: list[GlmTableIssue] = field(default_factory=list)
+    reasons: list[str] = field(default_factory=list)
+
+
 @dataclass(slots=True)
 class VisualTableIR:
     title: str | None
@@ -230,6 +254,17 @@ class _CallBudget:
 class VisualFusionService:
     """Build usable page output from regional visual evidence rather than page replacement."""
 
+    _FINANCIAL_PERIOD_HEADER = re.compile(
+        r"(?:19|20)\d{2}|期末|期初|本期|上期|本年|上年|年末|年初",
+        re.IGNORECASE,
+    )
+    _FINANCIAL_NOTE_IN_VALUE = re.compile(
+        r"(?:附注|[一二三四五六七八九十百]+、(?:\(?[一二三四五六七八九十百0-9]+\)?))"
+    )
+    _MISSING_NOTE_PARENTHESIS = re.compile(
+        r"^(?P<prefix>[^()（）]+、)(?P<ordinal>[一二三四五六七八九十百]+)\)$"
+    )
+    _FINANCIAL_SECTION = re.compile(r"(?:资产|负债|股东权益|所有者权益)[:：]$")
     _RESOLVED_WARNING_CODES = {
         "low_text_content",
         "repeated_text",
@@ -239,7 +274,6 @@ class VisualFusionService:
         "unanchored_table_numbers",
         "visual_text_mismatch",
     }
-
     def __init__(self, settings: object | None, qwen: OllamaVisualAdapter) -> None:
         self.settings = settings
         self.qwen = qwen
@@ -253,6 +287,15 @@ class VisualFusionService:
         self.reasoning_effort = str(setting(settings, "vlm_reasoning_effort", "low"))
         self.conflict_reasoning_effort = str(
             setting(settings, "vlm_conflict_reasoning_effort", "medium")
+        )
+        self.glm_table_gate_enabled = bool(
+            setting(settings, "glm_table_gate_enabled", True)
+        )
+        self.glm_targeted_max_rows = int(
+            setting(settings, "glm_table_targeted_max_rows", 8)
+        )
+        self.glm_targeted_max_cells = int(
+            setting(settings, "glm_table_targeted_max_cells", 12)
         )
 
     @staticmethod
@@ -274,6 +317,7 @@ class VisualFusionService:
         bbox: tuple[float, float, float, float],
         *,
         pad: float = 0.0,
+        upscale: int = 1,
     ) -> bytes:
         with Image.open(io.BytesIO(image)) as source:
             frame = source.convert("RGB")
@@ -292,6 +336,11 @@ class VisualFusionService:
             )
             if crop.width < 2 or crop.height < 2:
                 raise ValueError("visual crop is empty")
+            if upscale > 1:
+                crop = crop.resize(
+                    (crop.width * upscale, crop.height * upscale),
+                    Image.Resampling.LANCZOS,
+                )
             output = io.BytesIO()
             crop.save(output, format="PNG")
             return output.getvalue()
@@ -674,9 +723,354 @@ class VisualFusionService:
                     caption=fragment.caption,
                     unit_text=fragment.unit_text,
                     source_kind=fragment.source_kind,
+                    visual_obstructions=list(fragment.visual_obstructions),
+                    physical_num_rows=fragment.physical_num_rows or fragment.num_rows,
+                    source_row_indices=(
+                        list(fragment.source_row_indices)
+                        if fragment.source_row_indices
+                        else list(range(fragment.num_rows))
+                    ),
                 )
             )
         return split
+
+    @classmethod
+    def _normalize_financial_note(cls, value: str) -> str:
+        """Apply only a deterministic, visually unambiguous note-label repair."""
+
+        stripped = value.strip()
+        return cls._MISSING_NOTE_PARENTHESIS.sub(
+            lambda match: f"{match.group('prefix')}({match.group('ordinal')})",
+            stripped,
+        )
+
+    @staticmethod
+    def _decimal_value(value: str) -> Decimal | None:
+        normalized = (
+            value.strip()
+            .replace(",", "")
+            .replace("−", "-")
+            .replace("—", "-")
+            .replace(" ", "")
+        )
+        if not normalized or normalized in {"-", "--"}:
+            return None
+        negative_parentheses = normalized.startswith("(") and normalized.endswith(")")
+        if negative_parentheses:
+            normalized = f"-{normalized[1:-1]}"
+        if not re.fullmatch(r"-?\d+(?:\.\d+)?", normalized):
+            return None
+        try:
+            return Decimal(normalized)
+        except InvalidOperation:
+            return None
+
+    @classmethod
+    def _looks_like_note_in_value_column(cls, value: str) -> bool:
+        normalized = _normalized(value).replace("（", "(").replace("）", ")")
+        return bool(normalized and cls._FINANCIAL_NOTE_IN_VALUE.search(normalized))
+
+    @staticmethod
+    def _one_digit_correction(observed: Decimal, corrected: Decimal) -> bool:
+        """Return true only for an equal-width, one-glyph decimal correction."""
+
+        if observed.is_signed() != corrected.is_signed() or corrected < 0:
+            return False
+        places = max(
+            0,
+            -cast(int, observed.as_tuple().exponent),
+            -cast(int, corrected.as_tuple().exponent),
+        )
+        observed_text = f"{observed:.{places}f}".replace("-", "").replace(".", "")
+        corrected_text = f"{corrected:.{places}f}".replace("-", "").replace(".", "")
+        return len(observed_text) == len(corrected_text) and sum(
+            left != right
+            for left, right in zip(observed_text, corrected_text, strict=True)
+        ) == 1
+
+    @staticmethod
+    def _format_decimal_like(value: Decimal, template: str) -> str:
+        places = max(0, -cast(int, value.as_tuple().exponent))
+        rendered = f"{value:,.{places}f}" if "," in template else f"{value:.{places}f}"
+        return f"({rendered.removeprefix('-')})" if template.strip().startswith("(") else rendered
+
+    @classmethod
+    def _is_financial_fragment(cls, fragment: TableFragment) -> bool:
+        if fragment.num_cols != 4 or len(fragment.rows) < 4:
+            return False
+        header = fragment.rows[0]
+        if len(header) != 4:
+            return False
+        first = _normalized(header[0])
+        second = _normalized(header[1])
+        periods = sum(bool(cls._FINANCIAL_PERIOD_HEADER.search(cell)) for cell in header[2:])
+        return ("项目" in first or first in {"资产", "负债"}) and "附注" in second and periods == 2
+
+    @classmethod
+    def _normalized_glm_fragments(
+        cls,
+        fragments: list[TableFragment],
+    ) -> list[TableFragment]:
+        normalized: list[TableFragment] = []
+        for fragment in fragments:
+            for part in cls._split_wide_fragment(fragment):
+                rows: list[list[str]] = []
+                source_row_indices: list[int] = []
+                physical_indices = part.source_row_indices or list(range(len(part.rows)))
+                for physical_index, raw_row in zip(physical_indices, part.rows, strict=True):
+                    row = [str(cell or "").strip() for cell in raw_row]
+                    row.extend([""] * (part.num_cols - len(row)))
+                    row = row[: part.num_cols]
+                    if rows and not any(_normalized(cell) for cell in row):
+                        continue
+                    if len(row) >= 2:
+                        row[1] = cls._normalize_financial_note(row[1])
+                    rows.append(row)
+                    source_row_indices.append(physical_index)
+                if not rows:
+                    continue
+                markdown = render_gfm_rows(rows)
+                marker = f"<!-- table-fragment: {part.fragment_id} -->"
+                normalized.append(
+                    replace(
+                        part,
+                        ordinal=len(normalized) + 1,
+                        rows=rows,
+                        num_rows=len(rows),
+                        markdown=markdown,
+                        rendered=f"{marker}\n\n{markdown}",
+                        physical_num_rows=part.physical_num_rows or part.num_rows,
+                        source_row_indices=source_row_indices,
+                    )
+                )
+        return normalized
+
+    @classmethod
+    def _subtotal_candidate_issues(
+        cls,
+        fragment: TableFragment,
+        table_index: int,
+        structural_rows: set[int],
+    ) -> tuple[list[GlmTableIssue], list[str]]:
+        issues: list[GlmTableIssue] = []
+        reasons: list[str] = []
+        section_start: int | None = None
+        section_name = ""
+        for row_index, row in enumerate(fragment.rows[1:], start=1):
+            label = _normalized(row[0])
+            if cls._FINANCIAL_SECTION.search(label):
+                section_start = row_index
+                section_name = label.rstrip(":：")
+                continue
+            if (
+                section_start is None
+                or label != f"{section_name}合计"
+                or any(section_start < value < row_index for value in structural_rows)
+            ):
+                continue
+
+            included: list[tuple[int, list[str]]] = []
+            seen_notes: set[str] = set()
+            nested = False
+            for detail_index in range(section_start + 1, row_index):
+                detail = fragment.rows[detail_index]
+                detail_label = _normalized(detail[0])
+                if not detail_label or detail_label.endswith(("合计", "总计")):
+                    continue
+                if detail_label.startswith("其中"):
+                    nested = True
+                    continue
+                note = _normalized(detail[1])
+                if note:
+                    if note in seen_notes:
+                        continue
+                    seen_notes.add(note)
+                    nested = False
+                elif nested:
+                    continue
+                included.append((detail_index, detail))
+
+            for column_index in (2, 3):
+                total = cls._decimal_value(row[column_index])
+                values = [
+                    (detail_index, value)
+                    for detail_index, detail in included
+                    if (value := cls._decimal_value(detail[column_index])) is not None
+                ]
+                if total is None or len(values) < 2:
+                    continue
+                discrepancy = sum((value for _index, value in values), Decimal(0)) - total
+                if abs(discrepancy) <= Decimal("0.005"):
+                    continue
+                suspects = [
+                    detail_index
+                    for detail_index, value in values
+                    if cls._one_digit_correction(value, value - discrepancy)
+                ]
+                physical_rows = fragment.physical_num_rows or fragment.num_rows
+                physical_indices = fragment.source_row_indices or list(
+                    range(fragment.num_rows)
+                )
+                obstructed = [
+                    suspect
+                    for suspect in suspects
+                    if any(
+                        obstruction[0] < fragment.normalized_bbox[2]
+                        and obstruction[2] > fragment.normalized_bbox[0]
+                        and obstruction[1]
+                        < fragment.normalized_bbox[1]
+                        + (fragment.normalized_bbox[3] - fragment.normalized_bbox[1])
+                        * (physical_indices[suspect] + 1)
+                        / physical_rows
+                        and obstruction[3]
+                        > fragment.normalized_bbox[1]
+                        + (fragment.normalized_bbox[3] - fragment.normalized_bbox[1])
+                        * physical_indices[suspect]
+                        / physical_rows
+                        for obstruction in fragment.visual_obstructions
+                    )
+                ]
+                localized = obstructed or (suspects if len(suspects) == 1 else [])
+                if localized:
+                    for suspect in localized:
+                        observed = cls._decimal_value(fragment.rows[suspect][column_index])
+                        alternate_values: tuple[tuple[int, str], ...] = ()
+                        if observed is not None:
+                            corrected = observed - discrepancy
+                            alternate_values = (
+                                (
+                                    column_index,
+                                    cls._format_decimal_like(
+                                        corrected,
+                                        fragment.rows[suspect][column_index],
+                                    ),
+                                ),
+                            )
+                        issues.append(
+                            GlmTableIssue(
+                                code="subtotal_single_digit_conflict",
+                                table_index=table_index,
+                                row_index=suspect,
+                                column_indices=(column_index,),
+                                row_label=fragment.rows[suspect][0],
+                                alternate_values=alternate_values,
+                            )
+                        )
+                else:
+                    reasons.append("subtotal_mismatch_not_localizable")
+        return issues, reasons
+
+    def assess_glm_table_candidate(
+        self,
+        fragments: list[TableFragment],
+    ) -> GlmTableAssessment:
+        """Choose direct GLM, row-level Qwen, or full-table Qwen from measured invariants."""
+
+        normalized = self._normalized_glm_fragments(fragments)
+        if not self.glm_table_gate_enabled:
+            return GlmTableAssessment(route="full", reasons=["glm_table_gate_disabled"])
+        if not normalized:
+            return GlmTableAssessment(route="full", reasons=["missing_glm_table"])
+        if len(normalized) > 4 or any(not fragment.valid for fragment in normalized):
+            return GlmTableAssessment(
+                route="full",
+                fragments=normalized,
+                reasons=["invalid_or_excessive_table_topology"],
+            )
+        if any(not self._is_financial_fragment(fragment) for fragment in normalized):
+            return GlmTableAssessment(
+                route="full",
+                fragments=normalized,
+                reasons=["schema_not_confidently_financial"],
+            )
+
+        issues: list[GlmTableIssue] = []
+        reasons: list[str] = []
+        for table_index, fragment in enumerate(normalized):
+            structural_rows: set[int] = set()
+            header_key = _normalized(fragment.rows[0][0])
+            for row_index, row in enumerate(fragment.rows[1:], start=1):
+                if _normalized(row[0]) == header_key:
+                    reasons.append("repeated_header_inside_table")
+                misplaced = tuple(
+                    column_index
+                    for column_index in (2, 3)
+                    if self._looks_like_note_in_value_column(row[column_index])
+                )
+                note_amount = self._decimal_value(row[1]) is not None and any(
+                    character in row[1] for character in ",."
+                )
+                if misplaced or note_amount:
+                    structural_rows.add(row_index)
+                    issues.append(
+                        GlmTableIssue(
+                            code="financial_column_shift",
+                            table_index=table_index,
+                            row_index=row_index,
+                            column_indices=(1, 2, 3),
+                            row_label=row[0],
+                        )
+                    )
+            subtotal_issues, subtotal_reasons = self._subtotal_candidate_issues(
+                fragment,
+                table_index,
+                structural_rows,
+            )
+            issues.extend(subtotal_issues)
+            reasons.extend(subtotal_reasons)
+
+        if len(normalized) == 2:
+            left_total = next(
+                (row for row in normalized[0].rows if _normalized(row[0]) == "资产总计"),
+                None,
+            )
+            right_total = next(
+                (
+                    row
+                    for row in normalized[1].rows
+                    if _normalized(row[0]) in {"负债和股东权益总计", "负债和所有者权益总计"}
+                ),
+                None,
+            )
+            if left_total is not None and right_total is not None:
+                for column_index in (2, 3):
+                    left_value = self._decimal_value(left_total[column_index])
+                    right_value = self._decimal_value(right_total[column_index])
+                    if (
+                        left_value is not None
+                        and right_value is not None
+                        and left_value != right_value
+                    ):
+                        reasons.append("balance_sheet_identity_mismatch")
+
+        unique: dict[tuple[int, int, tuple[int, ...]], GlmTableIssue] = {}
+        for issue in issues:
+            unique[(issue.table_index, issue.row_index, issue.column_indices)] = issue
+        issues = list(unique.values())
+        if reasons:
+            return GlmTableAssessment(
+                route="full",
+                fragments=normalized,
+                issues=issues,
+                reasons=list(dict.fromkeys(reasons)),
+            )
+        affected_rows = {(issue.table_index, issue.row_index) for issue in issues}
+        affected_cells = sum(len(issue.column_indices) for issue in issues)
+        if issues and (
+            len(affected_rows) > self.glm_targeted_max_rows
+            or affected_cells > self.glm_targeted_max_cells
+        ):
+            return GlmTableAssessment(
+                route="full",
+                fragments=normalized,
+                issues=issues,
+                reasons=["localized_conflict_budget_exceeded"],
+            )
+        return GlmTableAssessment(
+            route="targeted" if issues else "accept",
+            fragments=normalized,
+            issues=issues,
+        )
 
     @staticmethod
     def _match_source_row(rows: list[list[str]], label: str) -> list[str] | None:
@@ -1030,6 +1424,8 @@ class VisualFusionService:
         images: list[bytes],
         tables: list[VisualTableIR],
         conflicts: list[CellConflict],
+        *,
+        targeted: bool = False,
     ) -> tuple[int, int, VisualPageMetadata | None]:
         if not conflicts or not budget.can_call or not images:
             return 0, len(conflicts), None
@@ -1054,31 +1450,45 @@ class VisualFusionService:
                 "row": item.row_label,
                 "column": item.column_label,
                 "qwen_candidate": item.qwen_value,
-                "qwen_alternate_observation": item.qwen_alternate,
+                "alternate_candidate": item.qwen_alternate,
                 "glm_candidate": item.glm_value,
                 "docling_candidate": item.docling_value,
             }
             for item in prioritized
         ]
-        prompt = (
-            "The first image is a close page-header crop; remaining images are upright table "
-            "bands. Re-read company_name, statement_title, statement_date and unit from black "
-            "printed header glyphs, returning null for fields not visible. When red seal ink "
-            "overlaps black print, follow the black glyph strokes and do not infer a familiar "
-            "entity name. Also resolve only the listed cell "
-            "conflicts. Copy the actually visible value, including signs, commas and decimals. "
-            "You may choose either candidate or return a different visible value. Return null if "
-            "the cell is not visible; do not infer. Conflicts: "
-            f"{facts}"
-        )
+        if targeted:
+            prompt = (
+                "Each image is an enlarged upright crop around one or more suspicious financial "
+                "table rows. Resolve only the listed conflicts from visible black printed glyphs. "
+                "OCR and arithmetic candidates are untrusted hints and may differ by one digit; "
+                "select a candidate only when the pixels support it, otherwise transcribe the "
+                "visible value. Red seal ink may overlap black print. Preserve signs, commas and "
+                "decimals exactly. Return null when a cell is not visible and set all page metadata "
+                "fields to null. Conflicts: "
+                f"{facts}"
+            )
+        else:
+            prompt = (
+                "The first image is a close page-header crop; remaining images are upright table "
+                "bands. Re-read company_name, statement_title, statement_date and unit from black "
+                "printed header glyphs, returning null for fields not visible. When red seal ink "
+                "overlaps black print, follow the black glyph strokes and do not infer a familiar "
+                "entity name. Also resolve only the listed cell "
+                "conflicts. Copy the actually visible value, including signs, commas and decimals. "
+                "You may choose either candidate or return a different visible value. Return null "
+                "if the cell is not visible; do not infer. Conflicts: "
+                f"{facts}"
+            )
         try:
             completion = await self._structured_call(
                 budget,
-                images[:3],
+                images[:8] if targeted else images[:3],
                 prompt,
                 VisualConflictBatch,
-                max_tokens=self.conflict_max_tokens,
-                reasoning_effort=self.conflict_reasoning_effort,
+                max_tokens=min(2_048, self.conflict_max_tokens)
+                if targeted
+                else self.conflict_max_tokens,
+                reasoning_effort="none" if targeted else self.conflict_reasoning_effort,
             )
         except (ParserError, TimeoutError, ValueError):
             return 0, len(conflicts), None
@@ -1161,10 +1571,13 @@ class VisualFusionService:
         source_image_placeholders = re.findall(r"<!-- image(?:\s+[^>]*)? -->", base)
         replacement = "\n\n".join(fragment.rendered for fragment in qwen_fragments)
         replaced = False
-        for _index, fragment in enumerate(glm_fragments):
+        replacement_token = "<!-- mosaic-table-replacement -->"
+        for fragment in glm_fragments:
             if fragment.rendered and fragment.rendered in base:
-                base = base.replace(fragment.rendered, replacement if not replaced else "", 1)
+                base = base.replace(fragment.rendered, replacement_token if not replaced else "", 1)
                 replaced = True
+        if replaced:
+            base = base.replace(replacement_token, replacement, 1)
         if not replaced:
             primary_fragments = re.findall(
                 r"<!-- table-fragment: [^>]+ -->.*?(?=\n\n<!-- table-fragment:|\Z)",
@@ -1260,6 +1673,310 @@ class VisualFusionService:
             line for line in content.splitlines() if _normalized(line) not in removal_keys
         ).strip()
 
+    @staticmethod
+    def _glm_tables(fragments: list[TableFragment]) -> list[VisualTableIR]:
+        tables: list[VisualTableIR] = []
+        for fragment in fragments:
+            columns = [str(value or "") for value in fragment.rows[0]]
+            rows = [[str(value or "") for value in row] for row in fragment.rows[1:]]
+            tables.append(
+                VisualTableIR(
+                    title=fragment.caption,
+                    unit=fragment.unit_text,
+                    columns=columns,
+                    rows=rows,
+                    normalized_bbox=fragment.normalized_bbox,
+                    column_evidence=[
+                        {
+                            "qwen": None,
+                            "glm": value,
+                            "docling": None,
+                            "final": value,
+                        }
+                        for value in columns
+                    ],
+                    evidence=[
+                        [
+                            {
+                                "qwen": None,
+                                "glm": value,
+                                "docling": None,
+                                "final": value,
+                            }
+                            for value in row
+                        ]
+                        for row in rows
+                    ],
+                )
+            )
+        return tables
+
+    @staticmethod
+    def _updated_glm_fragments(
+        originals: list[TableFragment],
+        tables: list[VisualTableIR],
+        *,
+        targeted: bool,
+    ) -> list[TableFragment]:
+        output: list[TableFragment] = []
+        for fragment, table in zip(originals, tables, strict=True):
+            rows = [table.columns, *table.rows]
+            markdown = render_gfm_rows(rows)
+            marker = f"<!-- table-fragment: {fragment.fragment_id} -->"
+            prelude: list[str] = []
+            if table.title:
+                prelude.append(f"## {table.title}")
+            if table.unit:
+                prelude.append(table.unit)
+            rendered = "\n\n".join([marker, *prelude, markdown])
+            output.append(
+                replace(
+                    fragment,
+                    rows=rows,
+                    num_rows=len(rows),
+                    num_cols=len(table.columns),
+                    markdown=markdown,
+                    rendered=rendered,
+                    source_kind="glm_qwen_targeted" if targeted else "glm",
+                    cell_evidence=[table.column_evidence, *table.evidence],
+                )
+            )
+        return output
+
+    @staticmethod
+    def _targeted_row_bbox(
+        fragment: TableFragment,
+        row_indices: list[int],
+    ) -> tuple[float, float, float, float]:
+        left, top, right, bottom = fragment.normalized_bbox
+        physical_rows = fragment.physical_num_rows or fragment.num_rows
+        physical_indices = fragment.source_row_indices or list(range(fragment.num_rows))
+        selected = [physical_indices[index] for index in row_indices]
+        row_height = max(0.0001, (bottom - top) / max(1, physical_rows))
+        first = max(0.0, min(selected) - 3.0)
+        last = min(float(physical_rows), max(selected) + 3.0)
+        crop_top = top + row_height * first
+        if min(selected) <= 8:
+            crop_top = max(0.0, top - 0.05)
+        return (
+            left,
+            crop_top,
+            right,
+            min(1.0, top + row_height * last),
+        )
+
+    async def _use_glm_table_candidate(
+        self,
+        source: StoredSource,
+        options: ContentParseOptions,
+        primary: PageParseResult,
+        evidence: PageEvidence,
+        glm_page: PageParseResult | None,
+        source_glm_fragments: list[TableFragment],
+        assessment: GlmTableAssessment,
+        *,
+        allow_qwen: bool,
+    ) -> VisualFusionOutcome:
+        tables = self._glm_tables(assessment.fragments)
+        budget = _CallBudget(
+            max_calls=1,
+            deadline=time.monotonic() + self.page_budget_seconds,
+        )
+        metadata: VisualPageMetadata | None = None
+        attempted_targeted = assessment.route == "targeted" and allow_qwen
+        requested_cells = sum(len(issue.column_indices) for issue in assessment.issues)
+        model_resolved = 0
+
+        if attempted_targeted:
+            image = await self.qwen._render(
+                source, primary.page_number, options.visual_profile.value
+            )
+            rotation = evidence.detected_rotation_degrees or 0
+            upright = await asyncio.to_thread(self.qwen._rotate_image, image, rotation)
+            rows_by_table: dict[int, list[int]] = defaultdict(list)
+            conflicts: list[CellConflict] = []
+            seen_conflicts: set[tuple[int, int, int]] = set()
+            for issue in assessment.issues:
+                rows_by_table[issue.table_index].append(issue.row_index)
+                for column_index in issue.column_indices:
+                    key = (issue.table_index, issue.row_index, column_index)
+                    if key in seen_conflicts:
+                        continue
+                    seen_conflicts.add(key)
+                    row_index = issue.row_index - 1
+                    table = tables[issue.table_index]
+                    conflicts.append(
+                        CellConflict(
+                            conflict_id=(
+                                f"t{issue.table_index}r{row_index}c{column_index}"
+                            ),
+                            table_index=issue.table_index,
+                            row_index=row_index,
+                            column_index=column_index,
+                            row_label=table.rows[row_index][0],
+                            column_label=table.columns[column_index],
+                            is_header=False,
+                            qwen_value=None,
+                            qwen_alternate=dict(issue.alternate_values).get(column_index),
+                            glm_value=table.rows[row_index][column_index],
+                            docling_value=None,
+                        )
+                    )
+            row_images = [
+                self._image_crop(
+                    upright,
+                    self._targeted_row_bbox(
+                        assessment.fragments[table_index],
+                        row_indices,
+                    ),
+                    pad=0.035,
+                    upscale=2,
+                )
+                for table_index, row_indices in sorted(rows_by_table.items())[:2]
+            ]
+            model_resolved, _unresolved, metadata = await self._resolve_conflicts(
+                budget,
+                row_images,
+                tables,
+                conflicts,
+                targeted=True,
+            )
+
+        candidate_fragments = self._updated_glm_fragments(
+            assessment.fragments,
+            tables,
+            targeted=attempted_targeted,
+        )
+        final_assessment = self.assess_glm_table_candidate(candidate_fragments)
+        remaining_cells = sum(len(issue.column_indices) for issue in final_assessment.issues)
+        if final_assessment.route == "full" and final_assessment.reasons:
+            remaining_cells = max(1, remaining_cells)
+        resolved = max(0, min(model_resolved, requested_cells - remaining_cells))
+        unresolved = remaining_cells if assessment.route == "targeted" else 0
+        warnings: list[PipelineWarning] = []
+        if assessment.route == "targeted" and not allow_qwen:
+            warnings.append(
+                PipelineWarning(
+                    code="targeted_visual_repair_unavailable",
+                    message="the oriented GLM table was retained with localized unresolved cells",
+                    page_number=primary.page_number,
+                    backend=self.qwen.name,
+                    details={"count": requested_cells},
+                )
+            )
+            unresolved = max(1, requested_cells)
+        elif assessment.route == "targeted" and unresolved:
+            warnings.append(
+                PipelineWarning(
+                    code="targeted_visual_repair_incomplete",
+                    message="row-level Qwen verification did not resolve every GLM table invariant",
+                    page_number=primary.page_number,
+                    backend=self.qwen.name,
+                    details={"count": unresolved},
+                )
+            )
+        elif attempted_targeted:
+            warnings.append(
+                PipelineWarning(
+                    code="qwen_targeted_table_repair_used",
+                    message="Qwen re-read only the localized GLM conflict rows",
+                    severity=WarningSeverity.INFO,
+                    page_number=primary.page_number,
+                    backend=self.qwen.name,
+                    details={"cells": requested_cells},
+                )
+            )
+
+        page_metadata = (
+            metadata.company_name if metadata else None,
+            metadata.statement_title if metadata else None,
+            metadata.statement_date if metadata else None,
+            metadata.unit if metadata else None,
+        )
+        page = primary.model_copy(deep=True)
+        page.content = self._replace_table_regions(
+            primary,
+            glm_page,
+            source_glm_fragments,
+            candidate_fragments,
+            page_metadata=page_metadata,
+            discard_unlocalized_scanned_text=(
+                evidence.source_kind.value == "scanned"
+                and (evidence.detected_rotation_degrees or 0) in {90, 270}
+                and len(candidate_fragments) == 2
+                and (
+                    (self._union_bbox([item.normalized_bbox for item in candidate_fragments])[2]
+                    - self._union_bbox([item.normalized_bbox for item in candidate_fragments])[0])
+                    * (
+                        self._union_bbox([item.normalized_bbox for item in candidate_fragments])[3]
+                        - self._union_bbox([item.normalized_bbox for item in candidate_fragments])[1]
+                    )
+                    >= 0.5
+                )
+            ),
+        )
+        page.plain_text = None
+        page.backend = "glm-qwen-targeted" if attempted_targeted else "glm-table"
+        page.warnings = [
+            warning
+            for warning in page.warnings
+            if warning.code not in self._RESOLVED_WARNING_CODES
+        ]
+        page.warnings.extend(warnings)
+        page.status = (
+            PageStatus.WARNING
+            if any(warning.severity != WarningSeverity.INFO for warning in warnings)
+            else PageStatus.COMPLETED
+        )
+        diagnostics = page.diagnostics or PageDiagnostics(source_kind=evidence.source_kind)
+        diagnostics.selected_strategy = (
+            SelectionStrategy.GLM_QWEN_TARGETED
+            if attempted_targeted
+            else SelectionStrategy.GLM_TABLE
+        )
+        rotation = evidence.detected_rotation_degrees or 0
+        diagnostics.detected_rotation_degrees = cast(
+            Literal[0, 90, 180, 270], rotation if rotation in {0, 90, 180, 270} else 0
+        )
+        diagnostics.visual_fusion = VisualFusionDiagnostics(
+            routing_decision=(
+                "glm_targeted_qwen" if attempted_targeted else "glm_direct"
+            ),
+            candidate_issue_count=len(assessment.issues),
+            qwen_calls=budget.calls,
+            qwen_duration_ms=budget.duration_ms,
+            visual_regions=len(candidate_fragments),
+            table_count=len(candidate_fragments),
+            extracted_cells=sum(
+                fragment.num_cols * fragment.num_rows for fragment in candidate_fragments
+            ),
+            agreed_cells=0,
+            qwen_selected_fields=resolved,
+            qwen_resolved_conflicts=resolved,
+            unresolved_conflicts=unresolved,
+            truncated_calls=budget.truncated_calls,
+            partitions=len({(issue.table_index, issue.row_index) for issue in assessment.issues})
+            if attempted_targeted
+            else 0,
+        )
+        diagnostics.quality_verdict = (
+            QualityVerdict.TRUSTED if unresolved == 0 else QualityVerdict.DEGRADED
+        )
+        page.diagnostics = diagnostics
+        return VisualFusionOutcome(
+            page=page,
+            fragments=candidate_fragments,
+            ir=VisualPageIR(
+                page_number=primary.page_number,
+                rotation_degrees=evidence.detected_rotation_degrees or 0,
+                company_name=page_metadata[0],
+                statement_title=page_metadata[1],
+                statement_date=page_metadata[2],
+                unit=page_metadata[3],
+                tables=tables,
+            ),
+        )
+
     async def fuse_table_page(
         self,
         source: StoredSource,
@@ -1269,13 +1986,32 @@ class VisualFusionService:
         glm_page: PageParseResult | None,
         glm_fragments: list[TableFragment],
         docling_fragments: list[TableFragment],
+        *,
+        glm_assessment: GlmTableAssessment | None = None,
+        allow_qwen: bool = True,
     ) -> VisualFusionOutcome:
+        assessment = glm_assessment or self.assess_glm_table_candidate(glm_fragments)
+        if assessment.route in {"accept", "targeted"}:
+            return await self._use_glm_table_candidate(
+                source,
+                options,
+                primary,
+                evidence,
+                glm_page,
+                glm_fragments,
+                assessment,
+                allow_qwen=allow_qwen,
+            )
+        if not allow_qwen:
+            raise ParserError("full-table Qwen fallback is unavailable")
         budget = _CallBudget(
             max_calls=self.max_calls,
             deadline=time.monotonic() + self.page_budget_seconds,
         )
         warnings: list[PipelineWarning] = []
-        image = await self.qwen._render(source, primary.page_number, options.profile.value)
+        image = await self.qwen._render(
+            source, primary.page_number, options.visual_profile.value
+        )
         rotation = evidence.detected_rotation_degrees
         if rotation is None:
             try:
@@ -1489,6 +2225,8 @@ class VisualFusionService:
         diagnostics.selected_strategy = SelectionStrategy.QWEN_VISUAL_FUSION
         diagnostics.detected_rotation_degrees = rotation  # type: ignore[assignment]
         diagnostics.visual_fusion = VisualFusionDiagnostics(
+            routing_decision="qwen_full_table",
+            candidate_issue_count=len(assessment.issues),
             qwen_calls=budget.calls,
             qwen_duration_ms=budget.duration_ms,
             visual_regions=len(regions) if regions else 1,
@@ -1535,7 +2273,9 @@ class VisualFusionService:
             max_calls=self.max_calls,
             deadline=time.monotonic() + self.page_budget_seconds,
         )
-        image = await self.qwen._render(source, primary.page_number, options.profile.value)
+        image = await self.qwen._render(
+            source, primary.page_number, options.visual_profile.value
+        )
         rotation = evidence.detected_rotation_degrees or 0
         upright = await asyncio.to_thread(self.qwen._rotate_image, image, rotation)
         base = (glm_page.content if glm_page and glm_page.content else primary.content) or ""
@@ -1642,6 +2382,7 @@ class VisualFusionService:
         diagnostics = page.diagnostics or PageDiagnostics(source_kind=evidence.source_kind)
         diagnostics.selected_strategy = SelectionStrategy.QWEN_VISUAL_FUSION
         diagnostics.visual_fusion = VisualFusionDiagnostics(
+            routing_decision="qwen_signature",
             qwen_calls=budget.calls,
             qwen_duration_ms=budget.duration_ms,
             visual_regions=1,

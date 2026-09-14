@@ -31,9 +31,7 @@ async def test_repository_persists_state_and_progress(tmp_path: Path) -> None:
     assert progressed.progress.current == 1
     completed = await repository.complete(
         "job_01TEST",
-        result_path="result.json",
-        markdown_path="result.md",
-        text_path="result.txt",
+        result_path="result.md",
     )
     assert completed.status == JobStatus.COMPLETED
     assert (await repository.get("job_01TEST")) == completed

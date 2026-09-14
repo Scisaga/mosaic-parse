@@ -18,6 +18,9 @@ describe('ParseOptionsForm advanced settings', () => {
     expect(screen.queryByLabelText('执行方式')).not.toBeInTheDocument()
     expect(screen.queryByText('执行方式')).not.toBeInTheDocument()
     expect(screen.queryByText('同步解析')).not.toBeInTheDocument()
+    expect(screen.queryByText('质量档位')).not.toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: '均衡' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: '精确' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: '开始解析' })).toBeInTheDocument()
   })
 
@@ -41,7 +44,7 @@ describe('ParseOptionsForm advanced settings', () => {
     const dialog = screen.getByRole('dialog', { name: '高级设置' })
     expect(dialog).toBeInTheDocument()
     expect(trigger).toHaveAttribute('aria-expanded', 'true')
-    await waitFor(() => expect(screen.getByPlaceholderText('zh,en')).toHaveFocus())
+    await waitFor(() => expect(screen.getByLabelText('扫描页处理')).toHaveFocus())
 
     await user.keyboard('{Escape}')
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
@@ -68,10 +71,48 @@ describe('ParseOptionsForm advanced settings', () => {
     )
 
     await user.click(screen.getByRole('button', { name: '高级设置' }))
-    await waitFor(() => expect(screen.getByPlaceholderText('zh,en')).toHaveFocus())
+    await waitFor(() => expect(screen.getByLabelText('扫描页处理')).toHaveFocus())
     const done = screen.getByRole('button', { name: '完成' })
     done.focus()
     await user.keyboard('{Tab}')
     expect(screen.getByRole('button', { name: '关闭高级设置' })).toHaveFocus()
+  })
+
+  it('keeps embedded image descriptions opt-in', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(
+      <ParseOptionsForm
+        options={DEFAULT_OPTIONS}
+        onChange={onChange}
+        onSubmit={vi.fn()}
+        sourceReady
+        busy={false}
+      />,
+    )
+
+    await user.click(screen.getByRole('button', { name: '高级设置' }))
+    expect(screen.getByLabelText('图片描述语言')).toBeDisabled()
+    await user.selectOptions(screen.getByLabelText('嵌入图片描述'), 'on')
+    expect(onChange).toHaveBeenCalledWith({ ...DEFAULT_OPTIONS, describeImages: true })
+  })
+
+  it('exposes scan processing as an advanced opt-out', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(
+      <ParseOptionsForm
+        options={DEFAULT_OPTIONS}
+        onChange={onChange}
+        onSubmit={vi.fn()}
+        sourceReady
+        busy={false}
+      />,
+    )
+
+    await user.click(screen.getByRole('button', { name: '高级设置' }))
+    expect(screen.getByLabelText('扫描页处理')).toHaveValue('auto')
+    await user.selectOptions(screen.getByLabelText('扫描页处理'), 'skip')
+    expect(onChange).toHaveBeenCalledWith({ ...DEFAULT_OPTIONS, scanPolicy: 'skip' })
   })
 })

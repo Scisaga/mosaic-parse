@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Literal
 
-from app.models.content_result import ContentParseResult
+from app.models.content_result import ContentAsset
 from app.models.parse_result import DocumentParseResult
 from app.models.source import StoredSource
 from app.security.file_validation import FileValidationError, safe_filename, validate_stored_file
@@ -28,13 +28,11 @@ _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 @dataclass(frozen=True, slots=True)
 class StoredResultPaths:
     result: Path
-    markdown: Path
-    text: Path
     warnings: Path
 
 
-class LegacyResultContractError(ValueError):
-    """Persisted result does not use the current parse-result contract."""
+class AssetIndexError(ValueError):
+    """Persisted asset metadata does not use the current index contract."""
 
 
 class StorageService:
@@ -219,13 +217,12 @@ class StorageService:
         await self.create_job_layout(job_id)
         output = self.output_dir(job_id)
         if result.parse_result is None:
-            raise ValueError("content parse result is required before persistence")
+            raise ValueError("internal parse result is required before persistence")
         paths = StoredResultPaths(
-            result=output / "result.json",
-            markdown=output / "rendered.md",
-            text=output / "rendered.txt",
+            result=output / "result.md",
             warnings=self.logs_dir(job_id) / "warnings.json",
         )
+        asset_index = output / "asset-index.json"
         warning_payload = {
             "document_warnings": [warning.model_dump(mode="json") for warning in result.warnings],
             "units": [
@@ -239,12 +236,23 @@ class StorageService:
             ],
         }
         await asyncio.gather(
-            asyncio.to_thread(self._atomic_write, paths.markdown, result.markdown.encode("utf-8")),
-            asyncio.to_thread(self._atomic_write, paths.text, result.plain_text.encode("utf-8")),
+            asyncio.to_thread(self._atomic_write, paths.result, result.markdown.encode("utf-8")),
             asyncio.to_thread(
                 self._atomic_write,
-                paths.result,
-                result.parse_result.model_dump_json(indent=2).encode("utf-8"),
+                asset_index,
+                json.dumps(
+                    {
+                        "schema": "mosaic-asset-index/2.0",
+                        "content_id": result.parse_result.source.content_id,
+                        "source_sha256": result.parse_result.source.source_sha256,
+                        "assets": [
+                            asset.model_dump(mode="json", exclude={"locations"})
+                            for asset in result.parse_result.assets
+                        ],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ).encode("utf-8"),
             ),
             asyncio.to_thread(
                 self._atomic_write,
@@ -313,11 +321,32 @@ class StorageService:
     async def build_bundle(self, job_id: str) -> Path:
         """Atomically create and cache a ZIP bundle for a completed result."""
 
-        parse_result = await self.read_parse_result(job_id)
+        index = await self.read_asset_index(job_id)
+        raw_assets = index["assets"]
+        if not isinstance(raw_assets, list):
+            raise AssetIndexError(job_id)
+        assets = [ContentAsset.model_validate(item) for item in raw_assets]
         output = self.output_dir(job_id)
         target = output / "assets.zip"
         if target.is_file():
-            return target
+            try:
+                with zipfile.ZipFile(target) as archive:
+                    cached_manifest = json.loads(archive.read("manifest.json"))
+                cached_assets = (
+                    cached_manifest.get("assets", []) if isinstance(cached_manifest, dict) else []
+                )
+                if (
+                    isinstance(cached_manifest, dict)
+                    and cached_manifest.get("schema") == "mosaic-asset-bundle/1.0"
+                    and isinstance(cached_assets, list)
+                    and all(
+                        isinstance(asset, dict) and "locations" not in asset
+                        for asset in cached_assets
+                    )
+                ):
+                    return target
+            except (OSError, KeyError, json.JSONDecodeError, zipfile.BadZipFile):
+                pass
 
         def build() -> Path:
             descriptor, temporary_name = tempfile.mkstemp(
@@ -327,11 +356,12 @@ class StorageService:
             temporary = Path(temporary_name)
             try:
                 manifest = {
-                    "object": parse_result.object,
-                    "schema_version": parse_result.schema_version,
-                    "content_id": parse_result.source.content_id,
-                    "source_sha256": parse_result.source.source_sha256,
-                    "assets": [asset.model_dump(mode="json") for asset in parse_result.assets],
+                    "schema": "mosaic-asset-bundle/1.0",
+                    "content_id": index["content_id"],
+                    "source_sha256": index["source_sha256"],
+                    "assets": [
+                        asset.model_dump(mode="json", exclude={"locations"}) for asset in assets
+                    ],
                 }
                 with zipfile.ZipFile(
                     temporary, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6
@@ -340,7 +370,7 @@ class StorageService:
                         "manifest.json",
                         json.dumps(manifest, ensure_ascii=False, indent=2),
                     )
-                    for asset in parse_result.assets:
+                    for asset in assets:
                         path = self.asset_path(job_id, asset.asset_id)
                         if path is None:
                             continue
@@ -356,40 +386,39 @@ class StorageService:
 
         return await asyncio.to_thread(build)
 
-    def result_path(self, job_id: str, representation: str = "result") -> Path | None:
-        filenames = {
-            "result": "result.json",
-            "markdown": "rendered.md",
-            "text": "rendered.txt",
-        }
-        filename = filenames.get(str(representation))
-        if filename is None:
-            raise ValueError("invalid result representation")
-        path = self.output_dir(job_id) / filename
+    def result_path(self, job_id: str) -> Path | None:
+        path = self.output_dir(job_id) / "result.md"
         return path if path.is_file() else None
 
-    async def read_result(self, job_id: str, representation: str = "result") -> str:
-        path = self.result_path(job_id, representation)
+    async def read_result(self, job_id: str) -> str:
+        path = self.result_path(job_id)
         if path is None:
             raise FileNotFoundError(job_id)
         return await asyncio.to_thread(path.read_text, encoding="utf-8")
 
-    async def read_parse_result(self, job_id: str) -> ContentParseResult:
-        path = self.output_dir(job_id) / "result.json"
+    async def read_asset_index(self, job_id: str) -> dict[str, object]:
+        path = self.output_dir(job_id) / "asset-index.json"
         if not path.is_file():
             raise FileNotFoundError(job_id)
         data = await asyncio.to_thread(path.read_text, encoding="utf-8")
         try:
             payload = json.loads(data)
-        except json.JSONDecodeError:
-            payload = None
+        except json.JSONDecodeError as exc:
+            raise AssetIndexError(job_id) from exc
         if (
             not isinstance(payload, dict)
-            or payload.get("object") != "content.parse_result"
-            or payload.get("schema_version") != "content-parse-result/1.0"
+            or payload.get("schema") != "mosaic-asset-index/2.0"
+            or not isinstance(payload.get("assets"), list)
         ):
-            raise LegacyResultContractError(job_id)
-        return ContentParseResult.model_validate_json(data)
+            raise AssetIndexError(job_id)
+        return payload
+
+    async def read_assets(self, job_id: str) -> list[ContentAsset]:
+        payload = await self.read_asset_index(job_id)
+        raw_assets = payload["assets"]
+        if not isinstance(raw_assets, list):
+            raise AssetIndexError(job_id)
+        return [ContentAsset.model_validate(item) for item in raw_assets]
 
     async def copy_source(self, source: StoredSource, target_job_id: str) -> StoredSource:
         async def chunks() -> AsyncIterator[bytes]:

@@ -40,7 +40,10 @@ describe('App workspace submission', () => {
         }), { status: 202, headers: { 'Content-Type': 'application/json' } })
       }
       if (url.includes('/v1/content/jobs/job_async_only/result')) {
-        return new Response('', { headers: { 'Content-Type': url.includes('format=markdown') ? 'text/markdown' : 'text/plain' } })
+        return new Response('# Parsed result', { headers: { 'Content-Type': 'text/markdown' } })
+      }
+      if (url.includes('/v1/content/jobs/job_async_only/assets')) {
+        return new Response('[]', { headers: { 'Content-Type': 'application/json' } })
       }
       throw new Error(`Unexpected request: ${url}`)
     })

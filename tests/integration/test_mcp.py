@@ -23,7 +23,6 @@ async def test_mcp_tools_resources_and_prompt(tmp_path: Path, native_pdf: Path) 
                 "parse_content",
                 "get_content_job",
                 "get_content_result",
-                "get_content_rendering",
                 "get_content_assets",
             }
 
@@ -32,16 +31,32 @@ async def test_mcp_tools_resources_and_prompt(tmp_path: Path, native_pdf: Path) 
                 {
                     "file_base64": base64.b64encode(native_pdf.read_bytes()).decode(),
                     "filename": "native-report.pdf",
-                    "profile": "accurate",
+                    "scan_policy": "auto",
                 },
             )
             assert result.is_error is False
             assert result.structured_content is not None
             assert result.structured_content["delivery"] == "inline"
-            assert result.structured_content["object"] == "content.parse_result"
-            assert "12,345.67" in result.structured_content["renderings"]["markdown"]
+            assert result.structured_content["media_type"] == "text/markdown"
+            assert "12,345.67" in result.structured_content["content"]
             assert runtime.parser_service.last_options is not None
+            assert runtime.parser_service.last_options.scan_policy.value == "auto"
             assert runtime.parser_service.last_options.resolved_vlm_policy.value == "auto_visual"
+
+            parse_tool = next(tool for tool in tools.tools if tool.name == "parse_content")
+            assert "scan_policy" in parse_tool.input_schema["properties"]
+            assert "profile" not in parse_tool.input_schema["properties"]
+
+            invalid_policy = await client.call_tool(
+                "parse_content",
+                {
+                    "file_base64": base64.b64encode(native_pdf.read_bytes()).decode(),
+                    "filename": "native-report.pdf",
+                    "scan_policy": "ocr_only",
+                },
+            )
+            assert invalid_policy.structured_content is not None
+            assert invalid_policy.structured_content["error"]["code"] == "invalid_options"
 
             invalid = await client.call_tool(
                 "parse_content",
@@ -65,8 +80,9 @@ async def test_mcp_tools_resources_and_prompt(tmp_path: Path, native_pdf: Path) 
                 "content_parse_workflow",
                 {"content_kind": "scanned statement"},
             )
-            assert "profile=accurate" in prompt.messages[0].content.text
-            assert "ContentParseResult" in prompt.messages[0].content.text
+            assert "scan_policy=auto" in prompt.messages[0].content.text
+            assert "GFM Markdown" in prompt.messages[0].content.text
+            assert "logical tables" in prompt.messages[0].content.text
     finally:
         await runtime.close()
 

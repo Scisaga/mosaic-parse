@@ -9,17 +9,26 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ParseProfile(StrEnum):
+    # Adapter-only compatibility setting for persisted pre-0.4 jobs. New
+    # HTTP/MCP requests never expose a quality profile.
     FAST = "fast"
     BALANCED = "balanced"
     ACCURATE = "accurate"
 
 
+class ScanPolicy(StrEnum):
+    """Public policy for scanned PDF pages."""
+
+    AUTO = "auto"
+    SKIP = "skip"
+
+
 class VlmPolicy(StrEnum):
-    """Internal routing decision derived from the quality profile."""
+    """Internal routing decision derived from the scan policy."""
 
     OFF = "off"
     AUTO_VISUAL = "auto_visual"
@@ -33,14 +42,38 @@ class ContentParseOptions(BaseModel):
 
     model_config = ConfigDict(extra="forbid", use_enum_values=False)
 
-    profile: ParseProfile = ParseProfile.BALANCED
+    # Retained only to decode old database records and tune internal adapters.
+    # It is deliberately absent from public request/response contracts.
+    profile: ParseProfile = Field(default=ParseProfile.BALANCED, exclude=True)
+    scan_policy: ScanPolicy = ScanPolicy.AUTO
     unit_range: str | None = Field(default=None, max_length=2_048)
     language: list[LanguageCode] = Field(
         default_factory=lambda: ["zh", "en"], min_length=1, max_length=16
     )
-    include_renderings: bool = True
+    # Embedded PDF/Office images are always preserved as assets. Describing
+    # every image can be expensive, so model-generated descriptions are opt-in.
+    # Standalone image inputs are still analysed because the image is the source.
+    describe_images: bool = False
     description_language: Literal["zh-CN", "en", "auto"] = "zh-CN"
     timeout_seconds: int | None = Field(default=None, ge=1, le=86_400)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_profile(cls, value: object) -> object:
+        """Map persisted profile-only options onto the scan-policy contract."""
+
+        if not isinstance(value, dict) or "scan_policy" in value or "profile" not in value:
+            return value
+        normalized = dict(value)
+        raw_profile = normalized.get("profile")
+        if isinstance(raw_profile, ParseProfile):
+            raw_profile = raw_profile.value
+        normalized["scan_policy"] = (
+            ScanPolicy.AUTO.value
+            if raw_profile == ParseProfile.ACCURATE.value
+            else ScanPolicy.SKIP.value
+        )
+        return normalized
 
     @field_validator("unit_range")
     @classmethod
@@ -50,7 +83,7 @@ class ContentParseOptions(BaseModel):
         value = value.strip()
         if not value:
             return None
-        # Full semantic validation (including the document's upper bound) happens
+        # Full range validation (including the document's upper bound) happens
         # after the source has been inspected.
         from app.utils.page_range import parse_page_range
 
@@ -80,11 +113,19 @@ class ContentParseOptions(BaseModel):
 
     @property
     def resolved_vlm_policy(self) -> VlmPolicy:
-        """Accurate enables visual fusion; other profiles never call Qwen."""
+        """Automatic scan processing enables selective visual fusion."""
 
-        if self.profile == ParseProfile.ACCURATE:
+        if self.scan_policy == ScanPolicy.AUTO:
             return VlmPolicy.AUTO_VISUAL
         return VlmPolicy.OFF
+
+    @property
+    def visual_profile(self) -> ParseProfile:
+        """Use the measured high-resolution adapter path for automatic scans."""
+
+        if self.scan_policy == ScanPolicy.AUTO:
+            return ParseProfile.ACCURATE
+        return ParseProfile.BALANCED
 
     @property
     def page_range(self) -> str | None:

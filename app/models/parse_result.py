@@ -43,6 +43,9 @@ class QualityVerdict(StrEnum):
 class SelectionStrategy(StrEnum):
     DOCLING = "docling"
     NATIVE_REPAIR = "native_repair"
+    SCAN_SKIPPED = "scan_skipped"
+    GLM_TABLE = "glm_table"
+    GLM_QWEN_TARGETED = "glm_qwen_targeted"
     QWEN_VISUAL_FUSION = "qwen_visual_fusion"
 
 
@@ -51,6 +54,10 @@ class VisualFusionDiagnostics(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    routing_decision: Literal[
+        "glm_direct", "glm_targeted_qwen", "qwen_full_table", "qwen_signature"
+    ] | None = None
+    candidate_issue_count: int | None = Field(default=None, ge=0)
     qwen_calls: int | None = Field(default=None, ge=0)
     qwen_duration_ms: int | None = Field(default=None, ge=0)
     visual_regions: int | None = Field(default=None, ge=0)

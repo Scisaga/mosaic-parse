@@ -1,6 +1,6 @@
 # Benchmark guide
 
-Parsing quality is evaluated semantically, not by exact whole-document string
+Parsing quality is evaluated at the content level, not by exact whole-document string
 equality. Docling and model upgrades can make harmless Markdown formatting
 changes.
 
@@ -41,8 +41,8 @@ Record at least:
 Unknown route counts are not zeros. Report them as unavailable when the parser
 or upstream component cannot observe them reliably.
 
-Performance release gates are: `balanced` native numeric pages p95 no more than
-10% above the fixed baseline; `accurate` complex pages p95 no more than about
+Performance release gates are: `scan_policy=auto` native numeric pages p95 no more than
+10% above the fixed baseline; automatically routed complex pages p95 no more than about
 2x baseline; and no single VLM table page above 120 seconds. A page timeout must
 stop later candidates while retaining the primary page with a warning.
 
@@ -54,7 +54,7 @@ Start the service, then run:
 uv run python scripts/benchmark.py \
   tests/fixtures/native-report.pdf \
   tests/fixtures/table-report.pdf \
-  --mode standard \
+  --scan-policy auto \
   --json-output benchmark-results/standard.json
 ```
 
@@ -64,7 +64,7 @@ For the GPU path:
 uv run python scripts/benchmark.py \
   tests/fixtures/scanned-report.pdf \
   tests/fixtures/sample-image.png \
-  --mode ocr \
+  --scan-policy auto \
   --json-output benchmark-results/glm-ocr.json
 ```
 
@@ -82,5 +82,9 @@ Prefer focused assertions such as:
 - table output contains all expected cells in row order;
 - no unexpected Unicode replacement characters or repeated short blocks.
 
-Record parser version, Docling/plugin versions, model identity/revision, mode,
-profile, hardware, and all non-secret tuning values with every comparison.
+Record parser version, Docling/plugin versions, model identity/revision, scan
+policy, hardware, and all non-secret tuning values with every comparison.
+For CPU runs also record `DOCLING_NUM_THREADS`, `DOCLING_PAGE_WORKERS`, startup
+warm-up state, and whether native-page parallelism was selected. Compare at
+least two consecutive requests so startup model loading is not mistaken for
+steady-state conversion time.

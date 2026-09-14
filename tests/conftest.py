@@ -140,12 +140,6 @@ class FakeParserService:
             usage=ParseUsage(input_bytes=source.size_bytes, duration_ms=2),
         )
         parsed.parse_result = DocumentIRService().build(parsed, source, {})
-        if not options.include_renderings:
-            parsed.parse_result.renderings.markdown = ""
-            parsed.parse_result.renderings.plain_text = ""
-            for page in parsed.parse_result.units:
-                page.renderings.markdown = ""
-                page.renderings.plain_text = ""
         return parsed
 
 

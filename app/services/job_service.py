@@ -9,17 +9,17 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from app.models.content_result import ContentParseResult
+from app.models.content_result import ContentAsset
 from app.models.error import ServiceError
 from app.models.job import JobEvent, JobProgress, JobRecord, JobStatus
-from app.models.parse_options import ContentParseOptions
+from app.models.parse_options import ContentParseOptions, ParseProfile
 from app.models.parse_result import DocumentParseResult
 from app.models.source import StoredSource
 from app.repositories.job_repository import JobRepository
 from app.security.file_validation import DOCX_MIME, IMAGE_MIME_TYPES, PPTX_MIME, VIDEO_MIME_TYPES
 from app.services.parser_service import ParserService
 from app.services.source_service import SourceService
-from app.services.storage_service import LegacyResultContractError, StorageService
+from app.services.storage_service import AssetIndexError, StorageService
 from app.utils.ids import new_job_id
 from app.utils.page_range import PageRangeError, parse_page_range
 from app.utils.settings import setting
@@ -223,8 +223,6 @@ class JobService:
             await self.repository.complete(
                 job_id,
                 result_path=str(paths.result),
-                markdown_path=str(paths.markdown),
-                text_path=str(paths.text),
                 partial=partial,
             )
             return result
@@ -569,8 +567,6 @@ class JobService:
             await self.repository.complete(
                 job_id,
                 result_path=str(paths.result),
-                markdown_path=str(paths.markdown),
-                text_path=str(paths.text),
                 partial=partial,
             )
             await self._emit(
@@ -616,11 +612,12 @@ class JobService:
                 "only failed, partial, or cancelled jobs can be retried",
                 status_code=409,
             )
-        options = (
-            original.options.model_copy(update={"unit_range": unit_range})
-            if unit_range is not None
-            else original.options.model_copy()
-        )
+        updates: dict[str, object] = {}
+        if unit_range is not None:
+            updates["unit_range"] = unit_range
+        if original.options.profile == ParseProfile.FAST:
+            updates["profile"] = ParseProfile.BALANCED
+        options = original.options.model_copy(update=updates)
         new_id = new_job_id()
         original_source = StoredSource(
             path=Path(original.source_path),
@@ -688,32 +685,32 @@ class JobService:
         self._event_counters.pop(job_id, None)
         return deleted
 
-    async def get_result(self, job_id: str, representation: str = "result") -> str:
+    async def get_result(self, job_id: str) -> str:
         record = await self.get_job(job_id)
         if record.status not in {JobStatus.COMPLETED, JobStatus.PARTIAL}:
             raise ServiceError("result_not_ready", "job result is not available", status_code=409)
         try:
-            return await self.storage.read_result(job_id, representation)
+            return await self.storage.read_result(job_id)
         except FileNotFoundError as exc:
             raise ServiceError(
                 "result_missing", "persisted result file is missing", status_code=500
             ) from exc
 
-    async def get_parse_result(self, job_id: str) -> ContentParseResult:
+    async def get_assets(self, job_id: str) -> list[ContentAsset]:
         record = await self.get_job(job_id)
         if record.status not in {JobStatus.COMPLETED, JobStatus.PARTIAL}:
             raise ServiceError("result_not_ready", "job result is not available", status_code=409)
         try:
-            return await self.storage.read_parse_result(job_id)
-        except LegacyResultContractError as exc:
+            return await self.storage.read_assets(job_id)
+        except AssetIndexError as exc:
             raise ServiceError(
-                "legacy_result_contract",
-                "this retained job uses a retired result contract and is not converted",
-                status_code=409,
+                "asset_index_invalid",
+                "persisted asset metadata is invalid",
+                status_code=500,
             ) from exc
         except FileNotFoundError as exc:
             raise ServiceError(
-                "result_missing", "persisted parse result is missing", status_code=500
+                "result_missing", "persisted asset index is missing", status_code=500
             ) from exc
 
     async def events(

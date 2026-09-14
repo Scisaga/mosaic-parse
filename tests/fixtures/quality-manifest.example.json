@@ -1,12 +1,12 @@
 {
-  "version": 2,
+  "version": 3,
   "cases": [
     {
       "id": "synthetic-native-table",
       "file": "table-report.pdf",
       "sha256": "replace-with-local-sha256",
-      "profile": "balanced",
-      "page_range": "1",
+      "scan_policy": "auto",
+      "unit_range": "1",
       "max_duration_ms": 30000,
       "document": {
         "ordered_anchors": ["Synthetic report", "Total"]

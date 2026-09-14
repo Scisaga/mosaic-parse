@@ -259,8 +259,6 @@ class JobRepository:
         *,
         error: JobError | None = None,
         result_path: str | None = None,
-        result_markdown_path: str | None = None,
-        result_text_path: str | None = None,
     ) -> JobRecord:
         await self._ensure_initialized()
         target = JobStatus(to_status)
@@ -283,10 +281,6 @@ class JobRepository:
                     job.error = error
                 if result_path is not None:
                     job.result_path = result_path
-                if result_markdown_path is not None:
-                    job.result_markdown_path = result_markdown_path
-                if result_text_path is not None:
-                    job.result_text_path = result_text_path
                 connection.execute(self._insert_sql(replace=True), self._values(job))
                 return job
 
@@ -321,16 +315,12 @@ class JobRepository:
         job_id: str,
         *,
         result_path: str,
-        markdown_path: str,
-        text_path: str,
         partial: bool = False,
     ) -> JobRecord:
         return await self.transition(
             job_id,
             JobStatus.PARTIAL if partial else JobStatus.COMPLETED,
             result_path=result_path,
-            result_markdown_path=markdown_path,
-            result_text_path=text_path,
         )
 
     async def fail(
